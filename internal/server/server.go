@@ -75,8 +75,20 @@ type transitionRequest struct {
 func (server *Server) transition(response http.ResponseWriter, request *http.Request) {
 	path := strings.TrimPrefix(request.URL.Path, "/v1/port-calls/")
 	parts := strings.Split(path, "/")
+	if len(parts) == 3 && parts[0] != "" && parts[1] == "documents" && parts[2] == "review" {
+		server.reviewDocument(response, request, parts[0])
+		return
+	}
 	if len(parts) != 2 || parts[0] == "" {
 		writeError(response, http.StatusNotFound, "port call route not found")
+		return
+	}
+	if parts[1] == "documents" {
+		server.declareDocument(response, request, parts[0])
+		return
+	}
+	if parts[1] == "clearance" {
+		server.decideClearance(response, request, parts[0])
 		return
 	}
 	nextByOperation := map[string]portcall.Status{
@@ -104,14 +116,80 @@ func (server *Server) transition(response http.ResponseWriter, request *http.Req
 	writeJSON(response, http.StatusOK, call)
 }
 
+func (server *Server) declareDocument(response http.ResponseWriter, request *http.Request, callID string) {
+	var input portcall.DocumentDeclarationRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		writeError(response, http.StatusBadRequest, "invalid document declaration JSON")
+		return
+	}
+	document, err := server.store.DeclareDocument(request.Context(), callID, input)
+	if err != nil {
+		writePortCallError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusCreated, document)
+}
+
+type clearanceRequest struct {
+	ExpectedVersion int64                      `json:"expected_version"`
+	Decision        portcall.ClearanceDecision `json:"decision"`
+	Reason          string                     `json:"reason"`
+	DecidedBy       string                     `json:"decided_by"`
+}
+
+func (server *Server) reviewDocument(response http.ResponseWriter, request *http.Request, callID string) {
+	path := strings.TrimPrefix(request.URL.Path, "/v1/port-calls/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 3 || parts[1] != "documents" {
+		writeError(response, http.StatusNotFound, "document review route not found")
+		return
+	}
+	var input struct {
+		DocumentID string `json:"document_id"`
+		portcall.DocumentReviewRequest
+	}
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil || input.DocumentID == "" || input.ExpectedVersion < 1 {
+		writeError(response, http.StatusBadRequest, "document_id and positive expected_version are required")
+		return
+	}
+	document, err := server.store.ReviewDocument(request.Context(), callID, input.DocumentID, input.DocumentReviewRequest)
+	if err != nil {
+		writePortCallError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, document)
+}
+
+func (server *Server) decideClearance(response http.ResponseWriter, request *http.Request, callID string) {
+	var input clearanceRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil || input.ExpectedVersion < 1 {
+		writeError(response, http.StatusBadRequest, "expected_version must be a positive integer")
+		return
+	}
+	clearance, err := server.store.DecideClearance(request.Context(), callID, input.ExpectedVersion, input.Decision, input.Reason, input.DecidedBy)
+	if err != nil {
+		writePortCallError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusCreated, clearance)
+}
+
 func writePortCallError(response http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, portcall.ErrNotFound):
 		writeError(response, http.StatusNotFound, err.Error())
 	case errors.Is(err, portcall.ErrIdempotencyConflict):
 		writeError(response, http.StatusConflict, err.Error())
-	case errors.Is(err, portcall.ErrOptimisticConflict), errors.Is(err, portcall.ErrInvalidTransition):
+	case errors.Is(err, portcall.ErrOptimisticConflict), errors.Is(err, portcall.ErrInvalidTransition), errors.Is(err, portcall.ErrDocumentConflict), errors.Is(err, portcall.ErrClearanceConflict):
 		writeError(response, http.StatusConflict, err.Error())
+	case errors.Is(err, portcall.ErrClearanceInvalid):
+		writeError(response, http.StatusUnprocessableEntity, err.Error())
 	default:
 		writeError(response, http.StatusInternalServerError, "internal port-call failure")
 	}

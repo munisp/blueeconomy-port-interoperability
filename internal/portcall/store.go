@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -177,4 +178,181 @@ func (store *Store) Transition(ctx context.Context, callID string, expectedVersi
 		return PortCall{}, fmt.Errorf("commit transition: %w", err)
 	}
 	return updated, nil
+}
+
+type Clearance struct {
+	DecisionID  string            `json:"decision_id"`
+	CallID      string            `json:"call_id"`
+	Decision    ClearanceDecision `json:"decision"`
+	Reason      string            `json:"reason"`
+	DecidedBy   string            `json:"decided_by"`
+	CallVersion int64             `json:"call_version"`
+	DecidedAt   time.Time         `json:"decided_at"`
+}
+
+func (store *Store) DeclareDocument(ctx context.Context, callID string, request DocumentDeclarationRequest) (DocumentDeclaration, error) {
+	if callID == "" || len(callID) > 256 || callID != strings.TrimSpace(callID) {
+		return DocumentDeclaration{}, ErrNotFound
+	}
+	if err := request.Validate(); err != nil {
+		return DocumentDeclaration{}, err
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return DocumentDeclaration{}, fmt.Errorf("begin document declaration: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var currentStatus Status
+	if err := tx.QueryRow(ctx, `SELECT status FROM port_calls WHERE call_id = $1 FOR UPDATE`, callID).Scan(&currentStatus); errors.Is(err, pgx.ErrNoRows) {
+		return DocumentDeclaration{}, ErrNotFound
+	} else if err != nil {
+		return DocumentDeclaration{}, fmt.Errorf("lock port call for document: %w", err)
+	}
+	if currentStatus == StatusRejected {
+		return DocumentDeclaration{}, ErrInvalidTransition
+	}
+	createdAt := time.Now().UTC()
+	id := uuid.New()
+	var document DocumentDeclaration
+	err = tx.QueryRow(ctx, `
+		INSERT INTO port_call_documents (document_id, call_id, document_type, media_type, size_bytes, sha256, declared_by, status, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
+		ON CONFLICT (call_id, document_type, sha256) DO NOTHING
+		RETURNING document_id, call_id, document_type, media_type, size_bytes, sha256, declared_by, status, created_at, updated_at`,
+		id, callID, request.DocumentType, request.MediaType, request.SizeBytes, request.SHA256, request.DeclaredBy, DocumentDeclared, createdAt,
+	).Scan(&document.DocumentID, &document.CallID, &document.DocumentType, &document.MediaType, &document.SizeBytes, &document.SHA256, &document.DeclaredBy, &document.Status, &document.CreatedAt, &document.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx, `SELECT document_id, call_id, document_type, media_type, size_bytes, sha256, declared_by, status, created_at, updated_at FROM port_call_documents WHERE call_id=$1 AND document_type=$2 AND sha256=$3 FOR UPDATE`, callID, request.DocumentType, request.SHA256).
+			Scan(&document.DocumentID, &document.CallID, &document.DocumentType, &document.MediaType, &document.SizeBytes, &document.SHA256, &document.DeclaredBy, &document.Status, &document.CreatedAt, &document.UpdatedAt)
+		if err != nil {
+			return DocumentDeclaration{}, fmt.Errorf("lookup document replay: %w", err)
+		}
+		if document.MediaType != request.MediaType || document.SizeBytes != request.SizeBytes || document.DeclaredBy != request.DeclaredBy {
+			return DocumentDeclaration{}, ErrDocumentConflict
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return DocumentDeclaration{}, fmt.Errorf("commit document replay: %w", err)
+		}
+		return document, nil
+	}
+	if err != nil {
+		return DocumentDeclaration{}, fmt.Errorf("insert document declaration: %w", err)
+	}
+	payload, err := json.Marshal(document)
+	if err != nil {
+		return DocumentDeclaration{}, fmt.Errorf("encode document event: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO port_call_outbox (event_id, call_id, event_type, payload, created_at) VALUES ($1,$2,'port_call.document_declared',$3,$4)`, uuid.New(), callID, payload, createdAt); err != nil {
+		return DocumentDeclaration{}, fmt.Errorf("write document event: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return DocumentDeclaration{}, fmt.Errorf("commit document declaration: %w", err)
+	}
+	return document, nil
+}
+
+func (store *Store) DecideClearance(ctx context.Context, callID string, expectedVersion int64, decision ClearanceDecision, reason, decidedBy string) (Clearance, error) {
+	if callID == "" || expectedVersion < 1 || (decision != ClearanceApproved && decision != ClearanceRejected) || reason == "" || reason != strings.TrimSpace(reason) || len(reason) > 1024 || decidedBy == "" || decidedBy != strings.TrimSpace(decidedBy) {
+		return Clearance{}, ErrClearanceInvalid
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return Clearance{}, fmt.Errorf("begin clearance: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var status Status
+	var currentVersion int64
+	if err := tx.QueryRow(ctx, `SELECT status, version FROM port_calls WHERE call_id=$1 FOR UPDATE`, callID).Scan(&status, &currentVersion); errors.Is(err, pgx.ErrNoRows) {
+		return Clearance{}, ErrNotFound
+	} else if err != nil {
+		return Clearance{}, fmt.Errorf("lock port call for clearance: %w", err)
+	}
+	if currentVersion != expectedVersion {
+		return Clearance{}, ErrOptimisticConflict
+	}
+	if status != StatusAccepted {
+		return Clearance{}, ErrClearanceInvalid
+	}
+	decidedAt := time.Now().UTC()
+	var clearance Clearance
+	err = tx.QueryRow(ctx, `
+		INSERT INTO port_call_clearance_decisions (decision_id, call_id, decision, reason, decided_by, call_version, decided_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)
+		ON CONFLICT (call_id) DO NOTHING
+		RETURNING decision_id, call_id, decision, reason, decided_by, call_version, decided_at`, uuid.New(), callID, decision, reason, decidedBy, expectedVersion+1, decidedAt).
+		Scan(&clearance.DecisionID, &clearance.CallID, &clearance.Decision, &clearance.Reason, &clearance.DecidedBy, &clearance.CallVersion, &clearance.DecidedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Clearance{}, ErrClearanceConflict
+	}
+	if err != nil {
+		return Clearance{}, fmt.Errorf("insert clearance decision: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE port_calls SET updated_at=$1, version=version+1 WHERE call_id=$2 AND version=$3`, decidedAt, callID, expectedVersion); err != nil {
+		return Clearance{}, fmt.Errorf("advance clearance version: %w", err)
+	}
+	payload, err := json.Marshal(clearance)
+	if err != nil {
+		return Clearance{}, fmt.Errorf("encode clearance event: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO port_call_outbox (event_id, call_id, event_type, payload, created_at) VALUES ($1,$2,'port_call.clearance_decided',$3,$4)`, uuid.New(), callID, payload, decidedAt); err != nil {
+		return Clearance{}, fmt.Errorf("write clearance event: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Clearance{}, fmt.Errorf("commit clearance: %w", err)
+	}
+	return clearance, nil
+}
+
+func (store *Store) ReviewDocument(ctx context.Context, callID, documentID string, request DocumentReviewRequest) (DocumentDeclaration, error) {
+	if callID == "" || documentID == "" || request.ExpectedVersion < 1 || (request.Status != DocumentVerified && request.Status != DocumentRejected) || request.ReviewedBy == "" || request.ReviewedBy != strings.TrimSpace(request.ReviewedBy) || request.Reason == "" || request.Reason != strings.TrimSpace(request.Reason) || len(request.Reason) > 1024 {
+		return DocumentDeclaration{}, ErrDocumentConflict
+	}
+	docID, err := uuid.Parse(documentID)
+	if err != nil {
+		return DocumentDeclaration{}, ErrDocumentConflict
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return DocumentDeclaration{}, fmt.Errorf("begin document review: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var document DocumentDeclaration
+	var reviewedBy, reviewedReason *string
+	var reviewedAt *time.Time
+	var currentStatus DocumentStatus
+	err = tx.QueryRow(ctx, `
+		UPDATE port_call_documents
+		SET status=$1, version=version+1, reviewed_by=$2, reviewed_reason=$3, reviewed_at=$4, updated_at=$4
+		WHERE document_id=$5 AND call_id=$6 AND status='DECLARED' AND version=$7
+		RETURNING document_id, call_id, document_type, media_type, size_bytes, sha256, declared_by, status, created_at, updated_at, version, reviewed_by, reviewed_reason, reviewed_at`,
+		request.Status, request.ReviewedBy, request.Reason, time.Now().UTC(), docID, callID, request.ExpectedVersion).
+		Scan(&document.DocumentID, &document.CallID, &document.DocumentType, &document.MediaType, &document.SizeBytes, &document.SHA256, &document.DeclaredBy, &document.Status, &document.CreatedAt, &document.UpdatedAt, &document.Version, &reviewedBy, &reviewedReason, &reviewedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx, `SELECT status FROM port_call_documents WHERE document_id=$1 AND call_id=$2`, docID, callID).Scan(&currentStatus)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return DocumentDeclaration{}, ErrNotFound
+		}
+		if err != nil {
+			return DocumentDeclaration{}, fmt.Errorf("lookup document review conflict: %w", err)
+		}
+		if currentStatus == request.Status {
+			return DocumentDeclaration{}, ErrDocumentConflict
+		}
+		return DocumentDeclaration{}, ErrOptimisticConflict
+	}
+	if err != nil {
+		return DocumentDeclaration{}, fmt.Errorf("review document: %w", err)
+	}
+	document.ReviewedBy, document.ReviewedReason, document.ReviewedAt = reviewedBy, reviewedReason, reviewedAt
+	payload, err := json.Marshal(document)
+	if err != nil {
+		return DocumentDeclaration{}, fmt.Errorf("encode document review event: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO port_call_outbox (event_id, call_id, event_type, payload, created_at) VALUES ($1,$2,'port_call.document_reviewed',$3,$4)`, uuid.New(), callID, payload, document.UpdatedAt); err != nil {
+		return DocumentDeclaration{}, fmt.Errorf("write document review event: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return DocumentDeclaration{}, fmt.Errorf("commit document review: %w", err)
+	}
+	return document, nil
 }

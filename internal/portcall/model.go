@@ -22,6 +22,9 @@ var (
 	ErrNotFound            = errors.New("port call not found")
 	ErrInvalidTransition   = errors.New("invalid port call transition")
 	ErrOptimisticConflict  = errors.New("port call changed concurrently")
+	ErrDocumentConflict    = errors.New("document declaration conflicts with retained evidence")
+	ErrClearanceConflict   = errors.New("clearance decision conflicts with retained decision")
+	ErrClearanceInvalid    = errors.New("clearance decision is not valid for this port call")
 )
 
 var portCodePattern = regexp.MustCompile(`^[A-Z]{2,8}$`)
@@ -35,12 +38,73 @@ type CreateRequest struct {
 	SubmittedBy    string `json:"submitted_by"`
 }
 
+type DocumentStatus string
+
+type ClearanceDecision string
+
+const (
+	DocumentDeclared  DocumentStatus    = "DECLARED"
+	DocumentVerified  DocumentStatus    = "VERIFIED"
+	DocumentRejected  DocumentStatus    = "REJECTED"
+	ClearanceApproved ClearanceDecision = "APPROVED"
+	ClearanceRejected ClearanceDecision = "REJECTED"
+)
+
+type DocumentDeclarationRequest struct {
+	DocumentType string `json:"document_type"`
+	MediaType    string `json:"media_type"`
+	SizeBytes    int64  `json:"size_bytes"`
+	SHA256       string `json:"sha256"`
+	DeclaredBy   string `json:"declared_by"`
+}
+
+type DocumentReviewRequest struct {
+	ExpectedVersion int64          `json:"expected_version"`
+	Status          DocumentStatus `json:"status"`
+	ReviewedBy      string         `json:"reviewed_by"`
+	Reason          string         `json:"reason"`
+}
+
+type DocumentDeclaration struct {
+	DocumentID string `json:"document_id"`
+	CallID     string `json:"call_id"`
+	DocumentDeclarationRequest
+	Status         DocumentStatus `json:"status"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+	Version        int64          `json:"version"`
+	ReviewedBy     *string        `json:"reviewed_by,omitempty"`
+	ReviewedReason *string        `json:"reviewed_reason,omitempty"`
+	ReviewedAt     *time.Time     `json:"reviewed_at,omitempty"`
+}
+
 type PortCall struct {
 	CreateRequest
 	Status    Status    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Version   int64     `json:"version"`
+}
+
+func (request DocumentDeclarationRequest) Validate() error {
+	for name, value := range map[string]string{"document_type": request.DocumentType, "media_type": request.MediaType, "sha256": request.SHA256, "declared_by": request.DeclaredBy} {
+		if value == "" || strings.TrimSpace(value) != value || len(value) > 256 {
+			return fmt.Errorf("%s must be canonical non-empty text of at most 256 characters", name)
+		}
+	}
+	if !regexp.MustCompile(`^[A-Za-z][A-Za-z0-9._:-]{0,63}$`).MatchString(request.DocumentType) {
+		return errors.New("document_type is invalid")
+	}
+	if !regexp.MustCompile(`^[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+$`).MatchString(request.MediaType) {
+		return errors.New("media_type is invalid")
+	}
+	if request.SizeBytes <= 0 || request.SizeBytes > 104857600 {
+		return errors.New("size_bytes must be between 1 and 104857600")
+	}
+	if !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(request.SHA256) {
+		return errors.New("sha256 must be a lowercase sha256 digest")
+	}
+	return nil
 }
 
 func (request CreateRequest) Validate() error {

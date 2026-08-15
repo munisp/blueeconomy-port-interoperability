@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,15 +26,24 @@ func main() {
 
 func run() error {
 	databaseURL := requiredEnv("DATABASE_URL")
-	migrationPath := requiredEnv("MIGRATION_PATH")
+	migrationPaths := requiredEnv("MIGRATION_PATH")
 	port := requiredEnv("PORT")
 	authMode := requiredEnv("AUTH_MODE")
 	if authMode != server.AuthModeLoopbackTrustedProxy {
 		return fmt.Errorf("AUTH_MODE must be %q until a verified Ministry OIDC edge is configured", server.AuthModeLoopbackTrustedProxy)
 	}
-	migration, err := os.ReadFile(filepath.Clean(migrationPath))
-	if err != nil {
-		return fmt.Errorf("read migration: %w", err)
+	paths := strings.Split(migrationPaths, ",")
+	migrations := make([][]byte, 0, len(paths))
+	for _, migrationPath := range paths {
+		migrationPath = strings.TrimSpace(migrationPath)
+		if migrationPath == "" {
+			return errors.New("MIGRATION_PATH contains an empty path")
+		}
+		migration, readErr := os.ReadFile(filepath.Clean(migrationPath))
+		if readErr != nil {
+			return fmt.Errorf("read migration %q: %w", migrationPath, readErr)
+		}
+		migrations = append(migrations, migration)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -42,8 +52,10 @@ func run() error {
 		return err
 	}
 	defer store.Close()
-	if _, err := store.Exec(ctx, string(migration)); err != nil {
-		return fmt.Errorf("apply migration: %w", err)
+	for index, migration := range migrations {
+		if _, err := store.Exec(ctx, string(migration)); err != nil {
+			return fmt.Errorf("apply migration %d: %w", index+1, err)
+		}
 	}
 	server := &http.Server{
 		Addr:              ":" + port,
