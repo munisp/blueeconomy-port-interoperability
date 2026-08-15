@@ -1,0 +1,168 @@
+openapi: 3.1.0
+info:
+  title: Blue Economy Port Interoperability API
+  version: 0.1.0
+  description: Implemented local port-call workflow; IMO/NSW partner profiles remain separate acceptance gates.
+servers:
+  - url: http://localhost:18080
+paths:
+  /healthz:
+    get:
+      operationId: health
+      responses:
+        '200':
+          description: Service is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    const: ok
+  /v1/port-calls:
+    post:
+      operationId: createPortCall
+      security: [loopbackTrustedProxy: []]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/TrustedProxy'
+        - $ref: '#/components/parameters/AuthenticatedPrincipal'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePortCallRequest'
+      responses:
+        '201':
+          description: Created or exact idempotent replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortCall'
+        '400': {description: Invalid request or missing idempotency key.}
+        '401': {description: Missing verified local edge identity.}
+        '409': {description: Conflicting idempotency reuse.}
+  /v1/port-calls/{call_id}:
+    get:
+      operationId: getPortCall
+      security: [loopbackTrustedProxy: []]
+      parameters:
+        - $ref: '#/components/parameters/CallID'
+        - $ref: '#/components/parameters/TrustedProxy'
+        - $ref: '#/components/parameters/AuthenticatedPrincipal'
+      responses:
+        '200':
+          description: Port call.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PortCall'}
+        '401': {description: Missing verified local edge identity.}
+        '404': {description: Port call not found.}
+  /v1/port-calls/{call_id}/submit:
+    post:
+      operationId: submitPortCall
+      security: [loopbackTrustedProxy: []]
+      parameters:
+        - $ref: '#/components/parameters/CallID'
+        - $ref: '#/components/parameters/TrustedProxy'
+        - $ref: '#/components/parameters/AuthenticatedPrincipal'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TransitionRequest'}
+      responses:
+        '200': {description: Port call submitted.}
+        '409': {description: Version or state conflict.}
+  /v1/port-calls/{call_id}/accept:
+    post:
+      operationId: acceptPortCall
+      security: [loopbackTrustedProxy: []]
+      parameters:
+        - $ref: '#/components/parameters/CallID'
+        - $ref: '#/components/parameters/TrustedProxy'
+        - $ref: '#/components/parameters/AuthenticatedPrincipal'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TransitionRequest'}
+      responses:
+        '200': {description: Port call accepted.}
+        '409': {description: Version or state conflict.}
+  /v1/port-calls/{call_id}/reject:
+    post:
+      operationId: rejectPortCall
+      security: [loopbackTrustedProxy: []]
+      parameters:
+        - $ref: '#/components/parameters/CallID'
+        - $ref: '#/components/parameters/TrustedProxy'
+        - $ref: '#/components/parameters/AuthenticatedPrincipal'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TransitionRequest'}
+      responses:
+        '200': {description: Port call rejected.}
+        '409': {description: Version or state conflict.}
+components:
+  securitySchemes:
+    loopbackTrustedProxy:
+      type: apiKey
+      in: header
+      name: X-Authenticated-Principal
+      description: Local-only boundary; production requires a verified Ministry OIDC/API-edge profile.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 256}
+    TrustedProxy:
+      name: X-Trusted-Proxy
+      in: header
+      required: true
+      schema: {type: string, const: loopback}
+    AuthenticatedPrincipal:
+      name: X-Authenticated-Principal
+      in: header
+      required: true
+      schema: {type: string, minLength: 1}
+    CallID:
+      name: call_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 256}
+  schemas:
+    CreatePortCallRequest:
+      type: object
+      additionalProperties: false
+      required: [call_id, vessel_imo, port_code, declaration_reference, submitted_by]
+      properties:
+        call_id: {type: string, minLength: 1, maxLength: 256}
+        vessel_imo: {type: string, pattern: '^[0-9]{7}$'}
+        port_code: {type: string, pattern: '^[A-Z]{2,8}$'}
+        declaration_reference: {type: string, minLength: 1, maxLength: 256}
+        submitted_by: {type: string, minLength: 1, maxLength: 256}
+    TransitionRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_version]
+      properties:
+        expected_version: {type: integer, minimum: 1}
+    PortCall:
+      type: object
+      required: [call_id, vessel_imo, port_code, declaration_reference, submitted_by, status, created_at, updated_at, version]
+      properties:
+        call_id: {type: string}
+        vessel_imo: {type: string}
+        port_code: {type: string}
+        declaration_reference: {type: string}
+        submitted_by: {type: string}
+        status: {type: string, enum: [DRAFT, SUBMITTED, ACCEPTED, REJECTED]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        version: {type: integer, minimum: 1}

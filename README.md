@@ -28,6 +28,8 @@ The script starts a real PostgreSQL 16.4 container, applies `db/migrations/0001_
 
 The service requires `DATABASE_URL`, `MIGRATION_PATH`, `PORT` and `AUTH_MODE`; the only currently accepted mode is `loopback_trusted_proxy`, which is restricted to loopback requests and requires both `X-Trusted-Proxy: loopback` and `X-Authenticated-Principal`. It does not create a database, invent partner routes or use an in-memory fallback.
 
+The implemented HTTP contract is documented in [`openapi.yaml`](openapi.yaml). It describes only the currently backed API and explicitly labels the local trusted-proxy boundary; it is not an IMO/NSW partner conformance profile.
+
 ## Current boundary
 
 This is an implemented local S1 foundation, not a complete Maritime Single Window. Remaining work includes the approved IMO/NSW message profile, port-agency adapters, document declarations, clearance decisions, authentication enforcement, external acknowledgements, workflow orchestration, conformance tests and Ministry acceptance.
