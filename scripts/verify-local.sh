@@ -33,6 +33,7 @@ GOFLAGS='' go build -o "$server_binary" ./cmd/port-interoperability
 DATABASE_URL='postgres://blueeconomy:local-only-integration-password@127.0.0.1:55433/blueeconomy_port?sslmode=disable' \
 MIGRATION_PATH="$repo_root/db/migrations/0001_port_calls.sql" \
 PORT=18080 \
+AUTH_MODE=loopback_trusted_proxy \
 "$server_binary" >"$repo_root/.integration-server.log" 2>&1 &
 server_pid=$!
 for _ in $(seq 1 30); do
@@ -40,29 +41,34 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 curl --fail --silent http://127.0.0.1:18080/healthz >/dev/null
+if curl --silent --show-error -o /tmp/port-call-unauthenticated.json -w '%{http_code}' \
+  -X GET http://127.0.0.1:18080/v1/port-calls/call-001 | grep -q '^401$'; then :; else
+  echo 'unauthenticated API request was not rejected' >&2
+  exit 1
+fi
 
 payload='{"call_id":"call-001","vessel_imo":"1234567","port_code":"LAGOS","declaration_reference":"decl-001","submitted_by":"agent-001"}'
 create=$(curl --fail --silent -X POST http://127.0.0.1:18080/v1/port-calls \
-  -H 'Content-Type: application/json' -H 'Idempotency-Key: idem-001' --data "$payload")
+  -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-agent' -H 'Idempotency-Key: idem-001' --data "$payload")
 printf '%s' "$create" | grep -q '"status":"DRAFT"'
 printf '%s' "$create" | grep -q '"version":1'
 replay=$(curl --fail --silent -X POST http://127.0.0.1:18080/v1/port-calls \
-  -H 'Content-Type: application/json' -H 'Idempotency-Key: idem-001' --data "$payload")
+  -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-agent' -H 'Idempotency-Key: idem-001' --data "$payload")
 test "$create" = "$replay"
 
 if curl --silent --show-error -o /tmp/port-call-conflict.json -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/port-calls \
-  -H 'Content-Type: application/json' -H 'Idempotency-Key: idem-001' \
+  -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-agent' -H 'Idempotency-Key: idem-001' \
   --data '{"call_id":"call-001","vessel_imo":"1234567","port_code":"LAGOS","declaration_reference":"changed","submitted_by":"agent-001"}' | grep -q '^409$'; then :; else
   echo 'conflicting idempotency replay was not rejected' >&2
   exit 1
 fi
 
 submitted=$(curl --fail --silent -X POST http://127.0.0.1:18080/v1/port-calls/call-001/submit \
-  -H 'Content-Type: application/json' --data '{"expected_version":1}')
+  -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-agent' --data '{"expected_version":1}')
 printf '%s' "$submitted" | grep -q '"status":"SUBMITTED"'
 printf '%s' "$submitted" | grep -q '"version":2'
 accepted=$(curl --fail --silent -X POST http://127.0.0.1:18080/v1/port-calls/call-001/accept \
-  -H 'Content-Type: application/json' --data '{"expected_version":2}')
+  -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-agent' --data '{"expected_version":2}')
 printf '%s' "$accepted" | grep -q '"status":"ACCEPTED"'
 printf '%s' "$accepted" | grep -q '"version":3'
 

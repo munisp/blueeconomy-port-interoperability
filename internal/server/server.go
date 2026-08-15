@@ -13,13 +13,15 @@ type Server struct {
 	store *portcall.Store
 }
 
-func New(store *portcall.Store) http.Handler {
+func New(store *portcall.Store, authMode string) http.Handler {
 	server := &Server{store: store}
+	api := http.NewServeMux()
+	api.HandleFunc("POST /v1/port-calls", server.create)
+	api.HandleFunc("GET /v1/port-calls/", server.get)
+	api.HandleFunc("POST /v1/port-calls/", server.transition)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", server.health)
-	mux.HandleFunc("POST /v1/port-calls", server.create)
-	mux.HandleFunc("GET /v1/port-calls/", server.get)
-	mux.HandleFunc("POST /v1/port-calls/", server.transition)
+	mux.Handle("/v1/", requireAuthentication(authMode, api))
 	return requestLimit(mux)
 }
 

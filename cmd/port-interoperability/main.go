@@ -27,6 +27,10 @@ func run() error {
 	databaseURL := requiredEnv("DATABASE_URL")
 	migrationPath := requiredEnv("MIGRATION_PATH")
 	port := requiredEnv("PORT")
+	authMode := requiredEnv("AUTH_MODE")
+	if authMode != server.AuthModeLoopbackTrustedProxy {
+		return fmt.Errorf("AUTH_MODE must be %q until a verified Ministry OIDC edge is configured", server.AuthModeLoopbackTrustedProxy)
+	}
 	migration, err := os.ReadFile(filepath.Clean(migrationPath))
 	if err != nil {
 		return fmt.Errorf("read migration: %w", err)
@@ -43,7 +47,7 @@ func run() error {
 	}
 	server := &http.Server{
 		Addr:              ":" + port,
-		Handler:           server.New(store),
+		Handler:           server.New(store, authMode),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,

@@ -13,6 +13,7 @@ The service provides:
 - Database-enforced status and version constraints.
 - Transactional append-only outbox events for creation and status changes.
 - HTTP read, create, submit, accept and reject endpoints.
+- Protected API routes requiring explicit loopback trusted-proxy identity in local mode.
 - Bounded request bodies, JSON unknown-field rejection and hardened HTTP server timeouts.
 
 ## Local verification
@@ -25,7 +26,7 @@ scripts/verify-local.sh
 
 The script starts a real PostgreSQL 16.4 container, applies `db/migrations/0001_port_calls.sql`, starts the service with an explicit database URL, and verifies creation, exact replay, conflicting replay rejection, optimistic transitions and three persisted outbox events. Docker access through passwordless `sudo` is supported for the sandbox environment.
 
-The service requires `DATABASE_URL`, `MIGRATION_PATH` and `PORT`; it does not create a database, invent partner routes or use an in-memory fallback.
+The service requires `DATABASE_URL`, `MIGRATION_PATH`, `PORT` and `AUTH_MODE`; the only currently accepted mode is `loopback_trusted_proxy`, which is restricted to loopback requests and requires both `X-Trusted-Proxy: loopback` and `X-Authenticated-Principal`. It does not create a database, invent partner routes or use an in-memory fallback.
 
 ## Current boundary
 
