@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16.4
+    network_mode: host
+    command: ["postgres", "-p", "55433"]
+    environment:
+      POSTGRES_DB: blueeconomy_port
+      POSTGRES_USER: blueeconomy
+      POSTGRES_PASSWORD: local-only-integration-password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -p 55433 -U blueeconomy -d blueeconomy_port"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql/data

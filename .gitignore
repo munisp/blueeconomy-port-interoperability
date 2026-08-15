@@ -1,0 +1,6 @@
+.integration-server.log
+.debug-server.log
+*.test
+coverage.out
+coverage.html
+bin/
