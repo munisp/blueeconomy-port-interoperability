@@ -85,6 +85,12 @@ if curl --silent --show-error -o /tmp/document-conflict.json -w '%{http_code}' -
   exit 1
 fi
 document_id=$(printf '%s' "$document" | python3 -c 'import json,sys; print(json.load(sys.stdin)["document_id"])')
+if curl --silent --show-error -o /tmp/clearance-before-document-review.json -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/port-calls/call-001/clearance \
+  -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-checker' \
+  --data '{"expected_version":3,"decision":"APPROVED","reason":"attempt before document verification","decided_by":"integration-checker"}' | grep -q '^422$'; then :; else
+  echo 'clearance approval before document verification was not rejected' >&2
+  exit 1
+fi
 review=$(curl --fail --silent -X POST http://127.0.0.1:18080/v1/port-calls/call-001/documents/review \
   -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-checker' \
   --data "{\"document_id\":\"$document_id\",\"expected_version\":1,\"status\":\"VERIFIED\",\"reviewed_by\":\"integration-checker\",\"reason\":\"digest and metadata verified\"}")
@@ -99,4 +105,4 @@ printf '%s' "$clearance" | grep -q '"call_version":4'
 container_id=$("${docker_prefix[@]}" ps --filter name=port-interoperability-postgres -q | head -n1)
 outbox_count=$("${docker_prefix[@]}" exec "$container_id" psql -p 55433 -U blueeconomy -d blueeconomy_port -Atc 'select count(*) from port_call_outbox where call_id = '\''call-001'\'';')
 test "$outbox_count" = 6
-printf '%s\n' 'S1 real PostgreSQL integration passed: create, exact replay, conflicting replay rejection, document declaration replay/conflict, document review/version control, clearance decision/version control and outbox atomicity.'
+printf '%s\n' 'S1 real PostgreSQL integration passed: create, exact replay, conflicting replay rejection, document declaration replay/conflict, approval-before-document-verification rejection, document review/version control, clearance decision/version control and outbox atomicity.'

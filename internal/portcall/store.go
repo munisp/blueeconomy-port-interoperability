@@ -273,6 +273,30 @@ func (store *Store) DecideClearance(ctx context.Context, callID string, expected
 	if status != StatusAccepted {
 		return Clearance{}, ErrClearanceInvalid
 	}
+	if decision == ClearanceApproved {
+		rows, queryErr := tx.Query(ctx, `SELECT status FROM port_call_documents WHERE call_id=$1 FOR UPDATE`, callID)
+		if queryErr != nil {
+			return Clearance{}, fmt.Errorf("lock documents for clearance: %w", queryErr)
+		}
+		defer rows.Close()
+		documentCount := 0
+		for rows.Next() {
+			var documentStatus DocumentStatus
+			if scanErr := rows.Scan(&documentStatus); scanErr != nil {
+				return Clearance{}, fmt.Errorf("read document status for clearance: %w", scanErr)
+			}
+			documentCount++
+			if documentStatus != DocumentVerified {
+				return Clearance{}, ErrClearanceInvalid
+			}
+		}
+		if rows.Err() != nil {
+			return Clearance{}, fmt.Errorf("iterate documents for clearance: %w", rows.Err())
+		}
+		if documentCount == 0 {
+			return Clearance{}, ErrClearanceInvalid
+		}
+	}
 	decidedAt := time.Now().UTC()
 	var clearance Clearance
 	err = tx.QueryRow(ctx, `
