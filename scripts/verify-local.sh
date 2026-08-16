@@ -96,13 +96,22 @@ review=$(curl --fail --silent -X POST http://127.0.0.1:18080/v1/port-calls/call-
   --data "{\"document_id\":\"$document_id\",\"expected_version\":1,\"status\":\"VERIFIED\",\"reviewed_by\":\"integration-checker\",\"reason\":\"digest and metadata verified\"}")
 printf '%s' "$review" | grep -q '"status":"VERIFIED"'
 printf '%s' "$review" | grep -q '"version":2'
+replacement_payload='{"document_type":"cargo_manifest","media_type":"application/pdf","size_bytes":4097,"sha256":"sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","declared_by":"integration-agent"}'
+replacement=$(curl --fail --silent -X POST http://127.0.0.1:18080/v1/port-calls/call-001/documents -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-agent' --data "$replacement_payload")
+replacement_id=$(printf '%s' "$replacement" | python3 -c 'import json,sys; print(json.load(sys.stdin)["document_id"])')
+replacement_review=$(curl --fail --silent -X POST http://127.0.0.1:18080/v1/port-calls/call-001/documents/review -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-checker' --data "{\"document_id\":\"$replacement_id\",\"expected_version\":1,\"status\":\"VERIFIED\",\"reviewed_by\":\"integration-checker\",\"reason\":\"replacement digest verified\"}")
+printf '%s' "$replacement_review" | grep -q '"status":"VERIFIED"'
+supersession=$(curl --fail --silent -X POST http://127.0.0.1:18080/v1/port-calls/call-001/documents/supersede -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-supervisor' --data "{\"original_document_id\":\"$document_id\",\"replacement_document_id\":\"$replacement_id\",\"reason\":\"corrected manifest\",\"superseded_by\":\"integration-supervisor\"}")
+printf '%s' "$supersession" | grep -q '"status":"superseded"'
 clearance=$(curl --fail --silent -X POST http://127.0.0.1:18080/v1/port-calls/call-001/clearance \
   -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-checker' \
   --data '{"expected_version":3,"decision":"APPROVED","reason":"all required declaration evidence verified","decided_by":"integration-checker"}')
 printf '%s' "$clearance" | grep -q '"decision":"APPROVED"'
 printf '%s' "$clearance" | grep -q '"call_version":4'
+amendment=$(curl --fail --silent -X POST http://127.0.0.1:18080/v1/port-calls/call-001/clearance/amend -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-amender' --data '{"expected_version":4,"decision":"REJECTED","reason":"new authority instruction","amended_by":"integration-amender"}')
+printf '%s' "$amendment" | grep -q '"decision":"REJECTED"'
 
 container_id=$("${docker_prefix[@]}" ps --filter name=port-interoperability-postgres -q | head -n1)
 outbox_count=$("${docker_prefix[@]}" exec "$container_id" psql -p 55433 -U blueeconomy -d blueeconomy_port -Atc 'select count(*) from port_call_outbox where call_id = '\''call-001'\'';')
-test "$outbox_count" = 6
-printf '%s\n' 'S1 real PostgreSQL integration passed: create, exact replay, conflicting replay rejection, document declaration replay/conflict, approval-before-document-verification rejection, document review/version control, clearance decision/version control and outbox atomicity.'
+test "$outbox_count" = 10
+printf '%s\n' 'S1 real PostgreSQL integration passed: create, exact replay, conflicting replay rejection, document declaration replay/conflict, approval-before-document-verification rejection, document review/version control, clearance decision, document supersession, clearance amendment and outbox atomicity.'
