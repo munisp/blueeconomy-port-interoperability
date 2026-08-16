@@ -79,6 +79,15 @@ func (server *Server) transition(response http.ResponseWriter, request *http.Req
 		server.reviewDocument(response, request, parts[0])
 		return
 	}
+	if len(parts) == 3 && parts[0] != "" && parts[1] == "documents" && parts[2] == "supersede" {
+		server.supersedeDocument(response, request, parts[0])
+		return
+	}
+	if len(parts) == 3 && parts[0] != "" && parts[1] == "clearance" && parts[2] == "amend" {
+		server.amendClearance(response, request, parts[0])
+		return
+	}
+
 	if len(parts) != 2 || parts[0] == "" {
 		writeError(response, http.StatusNotFound, "port call route not found")
 		return
@@ -162,6 +171,37 @@ func (server *Server) reviewDocument(response http.ResponseWriter, request *http
 		return
 	}
 	writeJSON(response, http.StatusOK, document)
+}
+
+func (server *Server) supersedeDocument(response http.ResponseWriter, request *http.Request, callID string) {
+	var input portcall.DocumentSupersessionRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		writeError(response, http.StatusBadRequest, "invalid document supersession JSON")
+		return
+	}
+	if err := server.store.SupersedeDocument(request.Context(), callID, input); err != nil {
+		writePortCallError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusCreated, map[string]string{"call_id": callID, "status": "superseded"})
+}
+
+func (server *Server) amendClearance(response http.ResponseWriter, request *http.Request, callID string) {
+	var input portcall.ClearanceAmendmentRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		writeError(response, http.StatusBadRequest, "invalid clearance amendment JSON")
+		return
+	}
+	clearance, err := server.store.AmendClearance(request.Context(), callID, input)
+	if err != nil {
+		writePortCallError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, clearance)
 }
 
 func (server *Server) decideClearance(response http.ResponseWriter, request *http.Request, callID string) {

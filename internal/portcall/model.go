@@ -145,3 +145,21 @@ func ValidTransition(current, next Status) bool {
 		return false
 	}
 }
+
+type DocumentSupersessionRequest struct {
+	OriginalDocumentID    string `json:"original_document_id"`
+	ReplacementDocumentID string `json:"replacement_document_id"`
+	Reason                string `json:"reason"`
+	SupersededBy          string `json:"superseded_by"`
+}
+
+type ClearanceAmendmentRequest struct {
+	ExpectedVersion int64             `json:"expected_version"`
+	Decision        ClearanceDecision `json:"decision"`
+	Reason          string            `json:"reason"`
+	AmendedBy       string            `json:"amended_by"`
+}
+
+func validateWorkflowText(value string, max int) bool {
+	return value != "" && value == strings.TrimSpace(value) && len(value) <= max
+}

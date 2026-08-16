@@ -31,7 +31,7 @@ trap cleanup EXIT
 server_binary=$(mktemp)
 GOFLAGS='' go build -o "$server_binary" ./cmd/port-interoperability
 DATABASE_URL='postgres://blueeconomy:local-only-integration-password@127.0.0.1:55433/blueeconomy_port?sslmode=disable' \
-MIGRATION_PATH="$repo_root/db/migrations/0001_port_calls.sql,$repo_root/db/migrations/0002_documents_clearance.sql,$repo_root/db/migrations/0003_document_review.sql" \
+MIGRATION_PATH="$repo_root/db/migrations/0001_port_calls.sql,$repo_root/db/migrations/0002_documents_clearance.sql,$repo_root/db/migrations/0003_document_review.sql,$repo_root/db/migrations/0004_document_supersession_clearance_amendment.sql" \
 PORT=18080 \
 AUTH_MODE=loopback_trusted_proxy \
 "$server_binary" >"$repo_root/.integration-server.log" 2>&1 &

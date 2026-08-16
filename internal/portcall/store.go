@@ -380,3 +380,81 @@ func (store *Store) ReviewDocument(ctx context.Context, callID, documentID strin
 	}
 	return document, nil
 }
+
+func (store *Store) SupersedeDocument(ctx context.Context, callID string, request DocumentSupersessionRequest) error {
+	if !validateWorkflowText(request.OriginalDocumentID, 64) || !validateWorkflowText(request.ReplacementDocumentID, 64) || request.OriginalDocumentID == request.ReplacementDocumentID || !validateWorkflowText(request.Reason, 1024) || !validateWorkflowText(request.SupersededBy, 256) {
+		return ErrDocumentConflict
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var originalType, replacementType string
+	var originalStatus, replacementStatus DocumentStatus
+	if err := tx.QueryRow(ctx, `SELECT document_type,status FROM port_call_documents WHERE document_id=$1 AND call_id=$2 FOR UPDATE`, request.OriginalDocumentID, callID).Scan(&originalType, &originalStatus); err != nil {
+		return ErrNotFound
+	}
+	if err := tx.QueryRow(ctx, `SELECT document_type,status FROM port_call_documents WHERE document_id=$1 AND call_id=$2 FOR UPDATE`, request.ReplacementDocumentID, callID).Scan(&replacementType, &replacementStatus); err != nil {
+		return ErrNotFound
+	}
+	if originalType != replacementType || originalStatus != DocumentVerified || replacementStatus != DocumentVerified {
+		return ErrDocumentConflict
+	}
+	now := time.Now().UTC()
+	id := uuid.New()
+	if _, err := tx.Exec(ctx, `INSERT INTO port_call_document_supersessions (supersession_id,call_id,original_document_id,replacement_document_id,reason,superseded_by,superseded_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`, id, callID, request.OriginalDocumentID, request.ReplacementDocumentID, request.Reason, request.SupersededBy, now); err != nil {
+		return ErrDocumentConflict
+	}
+	payload, _ := json.Marshal(request)
+	if _, err := tx.Exec(ctx, `INSERT INTO port_call_outbox (event_id,call_id,event_type,payload,created_at) VALUES ($1,$2,'port_call.document_superseded',$3,$4)`, uuid.New(), callID, payload, now); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (store *Store) AmendClearance(ctx context.Context, callID string, request ClearanceAmendmentRequest) (Clearance, error) {
+	if request.ExpectedVersion < 1 || (request.Decision != ClearanceApproved && request.Decision != ClearanceRejected) || !validateWorkflowText(request.Reason, 1024) || !validateWorkflowText(request.AmendedBy, 256) {
+		return Clearance{}, ErrClearanceInvalid
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return Clearance{}, err
+	}
+	defer tx.Rollback(ctx)
+	var callVersion int64
+	if err := tx.QueryRow(ctx, `SELECT version FROM port_calls WHERE call_id=$1 FOR UPDATE`, callID).Scan(&callVersion); err != nil {
+		return Clearance{}, ErrNotFound
+	}
+	if callVersion != request.ExpectedVersion {
+		return Clearance{}, ErrOptimisticConflict
+	}
+	var prior Clearance
+	if err := tx.QueryRow(ctx, `SELECT decision_id,call_id,decision,reason,decided_by,call_version,decided_at FROM port_call_clearance_decisions WHERE call_id=$1 FOR UPDATE`, callID).Scan(&prior.DecisionID, &prior.CallID, &prior.Decision, &prior.Reason, &prior.DecidedBy, &prior.CallVersion, &prior.DecidedAt); err != nil {
+		return Clearance{}, ErrNotFound
+	}
+	if prior.Decision == request.Decision || prior.DecidedBy == request.AmendedBy {
+		return Clearance{}, ErrClearanceConflict
+	}
+	now := time.Now().UTC()
+	amended := prior
+	amended.Decision = request.Decision
+	amended.Reason = request.Reason
+	amended.DecidedBy = request.AmendedBy
+	amended.CallVersion = callVersion
+	amended.DecidedAt = now
+	if _, err := tx.Exec(ctx, `UPDATE port_call_clearance_decisions SET decision=$1,reason=$2,decided_by=$3,call_version=$4,decided_at=$5 WHERE decision_id=$6`, amended.Decision, amended.Reason, amended.DecidedBy, amended.CallVersion, amended.DecidedAt, prior.DecisionID); err != nil {
+		return Clearance{}, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO port_call_clearance_amendments (amendment_id,call_id,prior_decision_id,prior_decision,amended_decision,reason,amended_by,call_version,amended_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, uuid.New(), callID, prior.DecisionID, prior.Decision, amended.Decision, amended.Reason, amended.DecidedBy, callVersion, now); err != nil {
+		return Clearance{}, err
+	}
+	payload, _ := json.Marshal(amended)
+	if _, err := tx.Exec(ctx, `INSERT INTO port_call_outbox (event_id,call_id,event_type,payload,created_at) VALUES ($1,$2,'port_call.clearance_amended',$3,$4)`, uuid.New(), callID, payload, now); err != nil {
+		return Clearance{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Clearance{}, err
+	}
+	return amended, nil
+}
