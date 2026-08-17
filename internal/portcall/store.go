@@ -74,7 +74,7 @@ func (store *Store) Create(ctx context.Context, idempotencyKey string, request C
 			agency_profile_id, agency_profile_version, status, created_at, updated_at, version`,
 		request.CallID, request.VesselIMO, request.PortCode, request.DeclarationRef,
 		request.SubmittedBy, request.AgencyProfileID, request.AgencyProfileVersion, StatusDraft, idempotencyKey, createdAt,
-		).Scan(&call.CallID, &call.VesselIMO, &call.PortCode, &call.DeclarationRef, &call.SubmittedBy, &call.AgencyProfileID, &call.AgencyProfileVersion,
+	).Scan(&call.CallID, &call.VesselIMO, &call.PortCode, &call.DeclarationRef, &call.SubmittedBy, &call.AgencyProfileID, &call.AgencyProfileVersion,
 		&call.Status, &call.CreatedAt, &call.UpdatedAt, &call.Version)
 	if err == nil {
 		inserted = true
@@ -479,24 +479,57 @@ func (store *Store) PartnerCapabilities(ctx context.Context) (PartnerCapabilitie
 	}, nil
 }
 
-
 func (store *Store) RegisterAgencyProfile(ctx context.Context, profile AgencyProfileRegistration) error {
 	if profile.ProfileID == "" || profile.Version == "" || profile.AgencyCode == "" || profile.ProfileSHA256 == "" || profile.RegisteredBy == "" ||
 		profile.ProfileID != strings.TrimSpace(profile.ProfileID) || profile.Version != strings.TrimSpace(profile.Version) || profile.RegisteredBy != strings.TrimSpace(profile.RegisteredBy) ||
 		!strings.HasPrefix(profile.ProfileSHA256, "sha256:") {
 		return errors.New("agency profile registration is invalid")
 	}
-	_, err := store.pool.Exec(ctx, `INSERT INTO port_agency_profiles (profile_id, version, agency_code, active, profile_sha256, registered_by, registered_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (profile_id, version) DO UPDATE SET active=EXCLUDED.active, profile_sha256=EXCLUDED.profile_sha256, registered_by=EXCLUDED.registered_by, registered_at=EXCLUDED.registered_at`, profile.ProfileID, profile.Version, profile.AgencyCode, profile.Active, profile.ProfileSHA256, profile.RegisteredBy, time.Now().UTC())
-	return err
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin agency profile registration: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	now := time.Now().UTC()
+	inserted, err := tx.Exec(ctx, `INSERT INTO port_agency_profile_versions (profile_id,version,agency_code,active,profile_sha256,registered_by,registered_at) VALUES ($1,$2,$3,true,$4,$5,$6) ON CONFLICT (profile_id,version) DO NOTHING`, profile.ProfileID, profile.Version, profile.AgencyCode, profile.ProfileSHA256, profile.RegisteredBy, now)
+	if err != nil {
+		return fmt.Errorf("insert immutable agency profile version: %w", err)
+	}
+	if inserted.RowsAffected() == 0 {
+		var agencyCode, digest string
+		if err := tx.QueryRow(ctx, `SELECT agency_code, profile_sha256 FROM port_agency_profile_versions WHERE profile_id=$1 AND version=$2 FOR SHARE`, profile.ProfileID, profile.Version).Scan(&agencyCode, &digest); err != nil {
+			return fmt.Errorf("load immutable agency profile version: %w", err)
+		}
+		if agencyCode != profile.AgencyCode || digest != profile.ProfileSHA256 {
+			return errors.New("agency profile version is immutable; create a new version")
+		}
+	} else if _, err := tx.Exec(ctx, `INSERT INTO port_agency_profile_events (profile_id,version,event_type,active,profile_sha256,actor,occurred_at,reason) VALUES ($1,$2,'REGISTERED',true,$3,$4,$5,'profile version registered')`, profile.ProfileID, profile.Version, profile.ProfileSHA256, profile.RegisteredBy, now); err != nil {
+		return fmt.Errorf("append agency profile registration event: %w", err)
+	}
+	if !profile.Active {
+		if _, err := tx.Exec(ctx, `INSERT INTO port_agency_profile_events (profile_id,version,event_type,active,profile_sha256,actor,occurred_at,reason) VALUES ($1,$2,'DEACTIVATED',false,$3,$4,$5,'profile deactivated')`, profile.ProfileID, profile.Version, profile.ProfileSHA256, profile.RegisteredBy, now); err != nil {
+			return fmt.Errorf("append agency profile deactivation event: %w", err)
+		}
+	} else if inserted.RowsAffected() == 0 {
+		if _, err := tx.Exec(ctx, `INSERT INTO port_agency_profile_events (profile_id,version,event_type,active,profile_sha256,actor,occurred_at,reason) VALUES ($1,$2,'ACTIVATED',true,$3,$4,$5,'profile activated')`, profile.ProfileID, profile.Version, profile.ProfileSHA256, profile.RegisteredBy, now); err != nil {
+			return fmt.Errorf("append agency profile activation event: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit agency profile registration: %w", err)
+	}
+	return nil
 }
 
 func ensureActiveAgencyProfile(ctx context.Context, tx pgx.Tx, profileID, version string) error {
 	var active bool
-	if err := tx.QueryRow(ctx, `SELECT active FROM port_agency_profiles WHERE profile_id=$1 AND version=$2 FOR SHARE`, profileID, version).Scan(&active); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT active FROM port_agency_profile_events WHERE profile_id=$1 AND version=$2 ORDER BY event_sequence DESC LIMIT 1 FOR SHARE`, profileID, version).Scan(&active); errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
-		return fmt.Errorf("load agency profile: %w", err)
+		return fmt.Errorf("load agency profile activation event: %w", err)
 	}
-	if !active { return ErrClearanceInvalid }
+	if !active {
+		return ErrClearanceInvalid
+	}
 	return nil
 }
