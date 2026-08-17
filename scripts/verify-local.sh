@@ -31,7 +31,7 @@ trap cleanup EXIT
 server_binary=$(mktemp)
 GOFLAGS='' go build -o "$server_binary" ./cmd/port-interoperability
 DATABASE_URL='postgres://blueeconomy:local-only-integration-password@127.0.0.1:55433/blueeconomy_port?sslmode=disable' \
-MIGRATION_PATH="$repo_root/db/migrations/0001_port_calls.sql,$repo_root/db/migrations/0002_documents_clearance.sql,$repo_root/db/migrations/0003_document_review.sql,$repo_root/db/migrations/0004_document_supersession_clearance_amendment.sql" \
+MIGRATION_PATH="$repo_root/db/migrations/0001_port_calls.sql,$repo_root/db/migrations/0002_documents_clearance.sql,$repo_root/db/migrations/0003_document_review.sql,$repo_root/db/migrations/0004_document_supersession_clearance_amendment.sql,$repo_root/db/migrations/0005_agency_profiles.sql" \
 PORT=18080 \
 AUTH_MODE=loopback_trusted_proxy \
 "$server_binary" >"$repo_root/.integration-server.log" 2>&1 &
@@ -47,7 +47,9 @@ if curl --silent --show-error -o /tmp/port-call-unauthenticated.json -w '%{http_
   exit 1
 fi
 
-payload='{"call_id":"call-001","vessel_imo":"1234567","port_code":"LAGOS","declaration_reference":"decl-001","submitted_by":"agent-001"}'
+profile='{"profile_id":"npa-lagos","version":"2026-08-16","agency_code":"NPA","profile_sha256":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","registered_by":"integration-admin","active":true}'
+curl --fail --silent -X POST http://127.0.0.1:18080/v1/agency-profiles -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-admin' --data "$profile" | grep -q '"profile_id":"npa-lagos"'
+payload='{"call_id":"call-001","vessel_imo":"1234567","port_code":"LAGOS","declaration_reference":"decl-001","submitted_by":"agent-001","agency_profile_id":"npa-lagos","agency_profile_version":"2026-08-16"}'
 create=$(curl --fail --silent -X POST http://127.0.0.1:18080/v1/port-calls \
   -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-agent' -H 'Idempotency-Key: idem-001' --data "$payload")
 printf '%s' "$create" | grep -q '"status":"DRAFT"'
@@ -56,9 +58,20 @@ replay=$(curl --fail --silent -X POST http://127.0.0.1:18080/v1/port-calls \
   -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-agent' -H 'Idempotency-Key: idem-001' --data "$payload")
 test "$create" = "$replay"
 
+if curl --silent --show-error -o /tmp/port-call-unknown-profile.json -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/port-calls -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-agent' -H 'Idempotency-Key: idem-unknown-profile' --data '{"call_id":"call-unknown","vessel_imo":"1234567","port_code":"LAGOS","declaration_reference":"decl-unknown","submitted_by":"agent-001","agency_profile_id":"unknown","agency_profile_version":"1"}' | grep -q '^404$'; then :; else
+  echo 'unknown agency profile was not rejected' >&2
+  exit 1
+fi
+inactive_profile='{"profile_id":"npa-inactive","version":"1","agency_code":"NPA","profile_sha256":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","registered_by":"integration-admin","active":false}'
+curl --fail --silent -X POST http://127.0.0.1:18080/v1/agency-profiles -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-admin' --data "$inactive_profile" >/dev/null
+if curl --silent --show-error -o /tmp/port-call-inactive-profile.json -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/port-calls -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-agent' -H 'Idempotency-Key: idem-inactive-profile' --data '{"call_id":"call-inactive","vessel_imo":"1234567","port_code":"LAGOS","declaration_reference":"decl-inactive","submitted_by":"agent-001","agency_profile_id":"npa-inactive","agency_profile_version":"1"}' | grep -q '^422$'; then :; else
+  echo 'inactive agency profile was not rejected' >&2
+  exit 1
+fi
+
 if curl --silent --show-error -o /tmp/port-call-conflict.json -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/port-calls \
   -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-agent' -H 'Idempotency-Key: idem-001' \
-  --data '{"call_id":"call-001","vessel_imo":"1234567","port_code":"LAGOS","declaration_reference":"changed","submitted_by":"agent-001"}' | grep -q '^409$'; then :; else
+  --data '{"call_id":"call-001","vessel_imo":"1234567","port_code":"LAGOS","declaration_reference":"changed","submitted_by":"agent-001","agency_profile_id":"npa-lagos","agency_profile_version":"2026-08-16"}' | grep -q '^409$'; then :; else
   echo 'conflicting idempotency replay was not rejected' >&2
   exit 1
 fi
@@ -103,6 +116,13 @@ replacement_review=$(curl --fail --silent -X POST http://127.0.0.1:18080/v1/port
 printf '%s' "$replacement_review" | grep -q '"status":"VERIFIED"'
 supersession=$(curl --fail --silent -X POST http://127.0.0.1:18080/v1/port-calls/call-001/documents/supersede -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-supervisor' --data "{\"original_document_id\":\"$document_id\",\"replacement_document_id\":\"$replacement_id\",\"reason\":\"corrected manifest\",\"superseded_by\":\"integration-supervisor\"}")
 printf '%s' "$supersession" | grep -q '"status":"superseded"'
+inactive_existing='{"profile_id":"npa-lagos","version":"2026-08-16","agency_code":"NPA","profile_sha256":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","registered_by":"integration-admin","active":false}'
+curl --fail --silent -X POST http://127.0.0.1:18080/v1/agency-profiles -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-admin' --data "$inactive_existing" >/dev/null
+if curl --silent --show-error -o /tmp/clearance-inactive-profile.json -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/port-calls/call-001/clearance -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-checker' --data '{"expected_version":3,"decision":"APPROVED","reason":"profile inactive enforcement","decided_by":"integration-checker"}' | grep -q '^422$'; then :; else
+  echo 'clearance did not reject inactive agency profile' >&2
+  exit 1
+fi
+curl --fail --silent -X POST http://127.0.0.1:18080/v1/agency-profiles -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-admin' --data "$profile" >/dev/null
 clearance=$(curl --fail --silent -X POST http://127.0.0.1:18080/v1/port-calls/call-001/clearance \
   -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-checker' \
   --data '{"expected_version":3,"decision":"APPROVED","reason":"all required declaration evidence verified","decided_by":"integration-checker"}')

@@ -58,20 +58,23 @@ func (store *Store) Create(ctx context.Context, idempotencyKey string, request C
 	}
 	defer tx.Rollback(ctx)
 
+	if err := ensureActiveAgencyProfile(ctx, tx, request.AgencyProfileID, request.AgencyProfileVersion); err != nil {
+		return PortCall{}, err
+	}
 	createdAt := time.Now().UTC()
 	var call PortCall
 	inserted := false
 	err = tx.QueryRow(ctx, `
 		INSERT INTO port_calls (
-			call_id, vessel_imo, port_code, declaration_reference, submitted_by,
+			call_id, vessel_imo, port_code, declaration_reference, submitted_by, agency_profile_id, agency_profile_version,
 			status, idempotency_key, created_at, updated_at, version
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, 1)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, 1)
 		ON CONFLICT (idempotency_key) DO NOTHING
 		RETURNING call_id, vessel_imo, port_code, declaration_reference, submitted_by,
-			status, created_at, updated_at, version`,
+			agency_profile_id, agency_profile_version, status, created_at, updated_at, version`,
 		request.CallID, request.VesselIMO, request.PortCode, request.DeclarationRef,
-		request.SubmittedBy, StatusDraft, idempotencyKey, createdAt,
-	).Scan(&call.CallID, &call.VesselIMO, &call.PortCode, &call.DeclarationRef, &call.SubmittedBy,
+		request.SubmittedBy, request.AgencyProfileID, request.AgencyProfileVersion, StatusDraft, idempotencyKey, createdAt,
+		).Scan(&call.CallID, &call.VesselIMO, &call.PortCode, &call.DeclarationRef, &call.SubmittedBy, &call.AgencyProfileID, &call.AgencyProfileVersion,
 		&call.Status, &call.CreatedAt, &call.UpdatedAt, &call.Version)
 	if err == nil {
 		inserted = true
@@ -81,9 +84,9 @@ func (store *Store) Create(ctx context.Context, idempotencyKey string, request C
 	if !inserted {
 		err = tx.QueryRow(ctx, `
 			SELECT call_id, vessel_imo, port_code, declaration_reference, submitted_by,
-				status, created_at, updated_at, version
+				agency_profile_id, agency_profile_version, status, created_at, updated_at, version
 			FROM port_calls WHERE idempotency_key = $1 FOR UPDATE`, idempotencyKey).
-			Scan(&call.CallID, &call.VesselIMO, &call.PortCode, &call.DeclarationRef, &call.SubmittedBy,
+			Scan(&call.CallID, &call.VesselIMO, &call.PortCode, &call.DeclarationRef, &call.SubmittedBy, &call.AgencyProfileID, &call.AgencyProfileVersion,
 				&call.Status, &call.CreatedAt, &call.UpdatedAt, &call.Version)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return PortCall{}, fmt.Errorf("idempotency lookup: %w", ErrNotFound)
@@ -119,9 +122,9 @@ func (store *Store) Get(ctx context.Context, callID string) (PortCall, error) {
 	var call PortCall
 	err := store.pool.QueryRow(ctx, `
 		SELECT call_id, vessel_imo, port_code, declaration_reference, submitted_by,
-			status, created_at, updated_at, version
+			agency_profile_id, agency_profile_version, status, created_at, updated_at, version
 		FROM port_calls WHERE call_id = $1`, callID).
-		Scan(&call.CallID, &call.VesselIMO, &call.PortCode, &call.DeclarationRef, &call.SubmittedBy,
+		Scan(&call.CallID, &call.VesselIMO, &call.PortCode, &call.DeclarationRef, &call.SubmittedBy, &call.AgencyProfileID, &call.AgencyProfileVersion,
 			&call.Status, &call.CreatedAt, &call.UpdatedAt, &call.Version)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PortCall{}, ErrNotFound
@@ -262,7 +265,8 @@ func (store *Store) DecideClearance(ctx context.Context, callID string, expected
 	defer tx.Rollback(ctx)
 	var status Status
 	var currentVersion int64
-	if err := tx.QueryRow(ctx, `SELECT status, version FROM port_calls WHERE call_id=$1 FOR UPDATE`, callID).Scan(&status, &currentVersion); errors.Is(err, pgx.ErrNoRows) {
+	var agencyProfileID, agencyProfileVersion string
+	if err := tx.QueryRow(ctx, `SELECT status, version, agency_profile_id, agency_profile_version FROM port_calls WHERE call_id=$1 FOR UPDATE`, callID).Scan(&status, &currentVersion, &agencyProfileID, &agencyProfileVersion); errors.Is(err, pgx.ErrNoRows) {
 		return Clearance{}, ErrNotFound
 	} else if err != nil {
 		return Clearance{}, fmt.Errorf("lock port call for clearance: %w", err)
@@ -272,6 +276,9 @@ func (store *Store) DecideClearance(ctx context.Context, callID string, expected
 	}
 	if status != StatusAccepted {
 		return Clearance{}, ErrClearanceInvalid
+	}
+	if err := ensureActiveAgencyProfile(ctx, tx, agencyProfileID, agencyProfileVersion); err != nil {
+		return Clearance{}, err
 	}
 	if decision == ClearanceApproved {
 		rows, queryErr := tx.Query(ctx, `SELECT status FROM port_call_documents WHERE call_id=$1 FOR UPDATE`, callID)
@@ -470,4 +477,26 @@ func (store *Store) PartnerCapabilities(ctx context.Context) (PartnerCapabilitie
 		SupportedClearanceDecision: []ClearanceDecision{ClearanceApproved, ClearanceRejected},
 		ExternalProfileRequired:    true,
 	}, nil
+}
+
+
+func (store *Store) RegisterAgencyProfile(ctx context.Context, profile AgencyProfileRegistration) error {
+	if profile.ProfileID == "" || profile.Version == "" || profile.AgencyCode == "" || profile.ProfileSHA256 == "" || profile.RegisteredBy == "" ||
+		profile.ProfileID != strings.TrimSpace(profile.ProfileID) || profile.Version != strings.TrimSpace(profile.Version) || profile.RegisteredBy != strings.TrimSpace(profile.RegisteredBy) ||
+		!strings.HasPrefix(profile.ProfileSHA256, "sha256:") {
+		return errors.New("agency profile registration is invalid")
+	}
+	_, err := store.pool.Exec(ctx, `INSERT INTO port_agency_profiles (profile_id, version, agency_code, active, profile_sha256, registered_by, registered_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (profile_id, version) DO UPDATE SET active=EXCLUDED.active, profile_sha256=EXCLUDED.profile_sha256, registered_by=EXCLUDED.registered_by, registered_at=EXCLUDED.registered_at`, profile.ProfileID, profile.Version, profile.AgencyCode, profile.Active, profile.ProfileSHA256, profile.RegisteredBy, time.Now().UTC())
+	return err
+}
+
+func ensureActiveAgencyProfile(ctx context.Context, tx pgx.Tx, profileID, version string) error {
+	var active bool
+	if err := tx.QueryRow(ctx, `SELECT active FROM port_agency_profiles WHERE profile_id=$1 AND version=$2 FOR SHARE`, profileID, version).Scan(&active); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return fmt.Errorf("load agency profile: %w", err)
+	}
+	if !active { return ErrClearanceInvalid }
+	return nil
 }

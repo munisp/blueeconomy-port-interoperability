@@ -31,11 +31,22 @@ var portCodePattern = regexp.MustCompile(`^[A-Z]{2,8}$`)
 var imoPattern = regexp.MustCompile(`^[0-9]{7}$`)
 
 type CreateRequest struct {
-	CallID         string `json:"call_id"`
-	VesselIMO      string `json:"vessel_imo"`
-	PortCode       string `json:"port_code"`
-	DeclarationRef string `json:"declaration_reference"`
-	SubmittedBy    string `json:"submitted_by"`
+	CallID               string `json:"call_id"`
+	VesselIMO            string `json:"vessel_imo"`
+	PortCode             string `json:"port_code"`
+	DeclarationRef       string `json:"declaration_reference"`
+	SubmittedBy          string `json:"submitted_by"`
+	AgencyProfileID      string `json:"agency_profile_id"`
+	AgencyProfileVersion string `json:"agency_profile_version"`
+}
+
+type AgencyProfileRegistration struct {
+	ProfileID     string `json:"profile_id"`
+	Version       string `json:"version"`
+	AgencyCode    string `json:"agency_code"`
+	ProfileSHA256 string `json:"profile_sha256"`
+	RegisteredBy  string `json:"registered_by"`
+	Active        bool   `json:"active"`
 }
 
 type DocumentStatus string
@@ -114,6 +125,8 @@ func (request CreateRequest) Validate() error {
 		"port_code":             request.PortCode,
 		"declaration_reference": request.DeclarationRef,
 		"submitted_by":          request.SubmittedBy,
+		"agency_profile_id":      request.AgencyProfileID,
+		"agency_profile_version": request.AgencyProfileVersion,
 	}
 	for name, value := range fields {
 		if value == "" || strings.TrimSpace(value) != value || len(value) > 256 {
@@ -132,7 +145,7 @@ func (request CreateRequest) Validate() error {
 func (call PortCall) Matches(request CreateRequest) bool {
 	return call.CallID == request.CallID && call.VesselIMO == request.VesselIMO &&
 		call.PortCode == request.PortCode && call.DeclarationRef == request.DeclarationRef &&
-		call.SubmittedBy == request.SubmittedBy
+		call.SubmittedBy == request.SubmittedBy && call.AgencyProfileID == request.AgencyProfileID && call.AgencyProfileVersion == request.AgencyProfileVersion
 }
 
 func ValidTransition(current, next Status) bool {

@@ -17,6 +17,7 @@ func New(store *portcall.Store, authMode string) http.Handler {
 	server := &Server{store: store}
 	api := http.NewServeMux()
 	api.HandleFunc("GET /v1/partner-capabilities", server.partnerCapabilities)
+	api.HandleFunc("POST /v1/agency-profiles", server.registerAgencyProfile)
 	api.HandleFunc("POST /v1/port-calls", server.create)
 	api.HandleFunc("GET /v1/port-calls/", server.get)
 	api.HandleFunc("POST /v1/port-calls/", server.transition)
@@ -41,6 +42,21 @@ func (server *Server) partnerCapabilities(response http.ResponseWriter, request 
 		return
 	}
 	writeJSON(response, http.StatusOK, capabilities)
+}
+
+func (server *Server) registerAgencyProfile(response http.ResponseWriter, request *http.Request) {
+	var input portcall.AgencyProfileRegistration
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		writeError(response, http.StatusBadRequest, "invalid agency profile JSON")
+		return
+	}
+	if err := server.store.RegisterAgencyProfile(request.Context(), input); err != nil {
+		writePortCallError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusCreated, input)
 }
 
 func (server *Server) create(response http.ResponseWriter, request *http.Request) {
