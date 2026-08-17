@@ -108,6 +108,51 @@ paths:
       responses:
         '200': {description: Port call rejected.}
         '409': {description: Version or state conflict.}
+  /v1/partner-capabilities:
+    get:
+      operationId: getPartnerCapabilities
+      security: [loopbackTrustedProxy: []]
+      parameters:
+        - $ref: '#/components/parameters/TrustedProxy'
+        - $ref: '#/components/parameters/AuthenticatedPrincipal'
+      responses:
+        '200': {description: Source-backed local capabilities.}
+        '401': {description: Missing verified edge identity.}
+  /v1/port-calls/{call_id}/documents:
+    post:
+      operationId: declareDocument
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/CallID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/DocumentDeclarationRequest'}}}}
+      responses: {'201': {description: Declared document.}, '409': {description: Replay/conflict.}, '422': {description: Invalid workflow.}}
+  /v1/port-calls/{call_id}/documents/review:
+    post:
+      operationId: reviewDocument
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/CallID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/DocumentReviewRequest'}}}}
+      responses: {'200': {description: Reviewed document.}, '409': {description: Version/state conflict.}}
+  /v1/port-calls/{call_id}/documents/supersede:
+    post:
+      operationId: supersedeDocument
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/CallID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/DocumentSupersessionRequest'}}}}
+      responses: {'201': {description: Immutable supersession evidence recorded.}, '409': {description: Document conflict.}}
+  /v1/port-calls/{call_id}/clearance:
+    post:
+      operationId: decideClearance
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/CallID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ClearanceDecisionRequest'}}}}
+      responses: {'201': {description: Clearance decision.}, '409': {description: Version/decision conflict.}, '422': {description: Evidence prerequisite unmet.}}
+  /v1/port-calls/{call_id}/clearance/amend:
+    post:
+      operationId: amendClearance
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/CallID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ClearanceAmendmentRequest'}}}}
+      responses: {'200': {description: Amended clearance.}, '409': {description: Version/actor/decision conflict.}, '422': {description: Invalid amendment.}}
 components:
   securitySchemes:
     loopbackTrustedProxy:
@@ -153,6 +198,53 @@ components:
       required: [expected_version]
       properties:
         expected_version: {type: integer, minimum: 1}
+    DocumentDeclarationRequest:
+      type: object
+      additionalProperties: false
+      required: [document_type, media_type, size_bytes, sha256, declared_by]
+      properties:
+        document_type: {type: string, pattern: '^[A-Za-z][A-Za-z0-9._:-]{0,63}$'}
+        media_type: {type: string, pattern: '^[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+$'}
+        size_bytes: {type: integer, minimum: 1, maximum: 104857600}
+        sha256: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        declared_by: {type: string, minLength: 1, maxLength: 256}
+    DocumentReviewRequest:
+      type: object
+      additionalProperties: false
+      required: [document_id, expected_version, status, reviewed_by, reason]
+      properties:
+        document_id: {type: string, format: uuid}
+        expected_version: {type: integer, minimum: 1}
+        status: {type: string, enum: [VERIFIED, REJECTED]}
+        reviewed_by: {type: string, minLength: 1, maxLength: 256}
+        reason: {type: string, minLength: 1, maxLength: 1024}
+    DocumentSupersessionRequest:
+      type: object
+      additionalProperties: false
+      required: [original_document_id, replacement_document_id, reason, superseded_by]
+      properties:
+        original_document_id: {type: string, format: uuid}
+        replacement_document_id: {type: string, format: uuid}
+        reason: {type: string, minLength: 1, maxLength: 1024}
+        superseded_by: {type: string, minLength: 1, maxLength: 256}
+    ClearanceDecisionRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_version, decision, reason, decided_by]
+      properties:
+        expected_version: {type: integer, minimum: 1}
+        decision: {type: string, enum: [APPROVED, REJECTED]}
+        reason: {type: string, minLength: 1, maxLength: 1024}
+        decided_by: {type: string, minLength: 1, maxLength: 256}
+    ClearanceAmendmentRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_version, decision, reason, amended_by]
+      properties:
+        expected_version: {type: integer, minimum: 1}
+        decision: {type: string, enum: [APPROVED, REJECTED]}
+        reason: {type: string, minLength: 1, maxLength: 1024}
+        amended_by: {type: string, minLength: 1, maxLength: 256}
     PortCall:
       type: object
       required: [call_id, vessel_imo, port_code, declaration_reference, submitted_by, status, created_at, updated_at, version]

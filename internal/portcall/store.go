@@ -458,3 +458,16 @@ func (store *Store) AmendClearance(ctx context.Context, callID string, request C
 	}
 	return amended, nil
 }
+
+func (store *Store) PartnerCapabilities(ctx context.Context) (PartnerCapabilities, error) {
+	if err := store.pool.Ping(ctx); err != nil {
+		return PartnerCapabilities{}, fmt.Errorf("partner capabilities database health: %w", err)
+	}
+	return PartnerCapabilities{
+		Service: "s1-port-interoperability", APIVersion: "1.0.0",
+		ImplementedOperations:      []string{"port_call.create", "port_call.get", "port_call.submit", "port_call.accept", "port_call.reject", "document.declare", "document.review", "document.supersede", "clearance.decide", "clearance.amend"},
+		SupportedDocumentStatus:    []DocumentStatus{DocumentDeclared, DocumentVerified, DocumentRejected},
+		SupportedClearanceDecision: []ClearanceDecision{ClearanceApproved, ClearanceRejected},
+		ExternalProfileRequired:    true,
+	}, nil
+}

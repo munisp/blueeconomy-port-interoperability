@@ -163,3 +163,12 @@ type ClearanceAmendmentRequest struct {
 func validateWorkflowText(value string, max int) bool {
 	return value != "" && value == strings.TrimSpace(value) && len(value) <= max
 }
+
+type PartnerCapabilities struct {
+	Service                    string              `json:"service"`
+	APIVersion                 string              `json:"api_version"`
+	ImplementedOperations      []string            `json:"implemented_operations"`
+	SupportedDocumentStatus    []DocumentStatus    `json:"supported_document_status"`
+	SupportedClearanceDecision []ClearanceDecision `json:"supported_clearance_decision"`
+	ExternalProfileRequired    bool                `json:"external_profile_required"`
+}

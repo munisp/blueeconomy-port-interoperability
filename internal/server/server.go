@@ -16,6 +16,7 @@ type Server struct {
 func New(store *portcall.Store, authMode string) http.Handler {
 	server := &Server{store: store}
 	api := http.NewServeMux()
+	api.HandleFunc("GET /v1/partner-capabilities", server.partnerCapabilities)
 	api.HandleFunc("POST /v1/port-calls", server.create)
 	api.HandleFunc("GET /v1/port-calls/", server.get)
 	api.HandleFunc("POST /v1/port-calls/", server.transition)
@@ -31,6 +32,15 @@ func requestLimit(next http.Handler) http.Handler {
 
 func (server *Server) health(response http.ResponseWriter, _ *http.Request) {
 	writeJSON(response, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (server *Server) partnerCapabilities(response http.ResponseWriter, request *http.Request) {
+	capabilities, err := server.store.PartnerCapabilities(request.Context())
+	if err != nil {
+		writePortCallError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, capabilities)
 }
 
 func (server *Server) create(response http.ResponseWriter, request *http.Request) {
