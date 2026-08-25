@@ -7,10 +7,10 @@ import (
 
 func validCreate() CreateRequest {
 	return CreateRequest{
-		CallID:         "call-001",
-		VesselIMO:      "1234567",
-		PortCode:       "LAGOS",
-		DeclarationRef: "decl-001",
+		CallID:               "call-001",
+		VesselIMO:            "1234567",
+		PortCode:             "LAGOS",
+		DeclarationRef:       "decl-001",
 		SubmittedBy:          "agent-001",
 		AgencyProfileID:      "npa-lagos",
 		AgencyProfileVersion: "2026-08-16",

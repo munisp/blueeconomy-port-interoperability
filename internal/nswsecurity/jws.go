@@ -32,7 +32,15 @@ type jwksDocument struct {
 	Keys []jwk `json:"keys"`
 }
 type jwk struct {
-	KTY, KID, N, E, X5C string `json:"kty","kid","n","e","x5c"`
+	KTY string `json:"kty"`
+	KID string `json:"kid"`
+	N   string `json:"n"`
+	E   string `json:"e"`
+	X5C string `json:"x5c"`
+}
+type protectedHeader struct {
+	Alg string `json:"alg"`
+	KID string `json:"kid"`
 }
 type cachedKeys struct {
 	keys      map[string]*rsa.PublicKey
@@ -113,9 +121,7 @@ func (v *Verifier) Verify(ctx context.Context, compact string, now time.Time) er
 	if err != nil {
 		return errors.New("invalid JWS protected header")
 	}
-	var header struct {
-		Alg, KID string `json:"alg","kid"`
-	}
+	var header protectedHeader
 	if json.Unmarshal(headerBytes, &header) != nil || !v.policy.AllowedAlgorithms[header.Alg] || header.KID == "" {
 		return errors.New("JWS protected header violates algorithm/KID policy")
 	}

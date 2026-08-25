@@ -120,11 +120,11 @@ func (request DocumentDeclarationRequest) Validate() error {
 
 func (request CreateRequest) Validate() error {
 	fields := map[string]string{
-		"call_id":               request.CallID,
-		"vessel_imo":            request.VesselIMO,
-		"port_code":             request.PortCode,
-		"declaration_reference": request.DeclarationRef,
-		"submitted_by":          request.SubmittedBy,
+		"call_id":                request.CallID,
+		"vessel_imo":             request.VesselIMO,
+		"port_code":              request.PortCode,
+		"declaration_reference":  request.DeclarationRef,
+		"submitted_by":           request.SubmittedBy,
 		"agency_profile_id":      request.AgencyProfileID,
 		"agency_profile_version": request.AgencyProfileVersion,
 	}
