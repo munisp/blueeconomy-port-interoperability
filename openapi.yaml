@@ -108,6 +108,27 @@ paths:
       responses:
         '200': {description: Port call rejected.}
         '409': {description: Version or state conflict.}
+  /v1/agency-profiles:
+    post:
+      operationId: registerAgencyProfile
+      security: [loopbackTrustedProxy: []]
+      parameters:
+        - $ref: '#/components/parameters/TrustedProxy'
+        - $ref: '#/components/parameters/AuthenticatedPrincipal'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AgencyProfileRegistration'}
+      responses:
+        '201':
+          description: Agency profile version registered or replayed.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgencyProfileRegistration'}
+        '400': {description: Invalid agency profile JSON.}
+        '401': {description: Missing verified edge identity.}
+        '409': {description: Immutable profile version conflict.}
   /v1/partner-capabilities:
     get:
       operationId: getPartnerCapabilities
@@ -182,6 +203,17 @@ components:
       required: true
       schema: {type: string, minLength: 1, maxLength: 256}
   schemas:
+    AgencyProfileRegistration:
+      type: object
+      additionalProperties: false
+      required: [profile_id, version, agency_code, profile_sha256, registered_by, active]
+      properties:
+        profile_id: {type: string, minLength: 1, maxLength: 256}
+        version: {type: string, minLength: 1, maxLength: 128}
+        agency_code: {type: string, minLength: 1, maxLength: 128}
+        profile_sha256: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        registered_by: {type: string, minLength: 1, maxLength: 256}
+        active: {type: boolean}
     CreatePortCallRequest:
       type: object
       additionalProperties: false
