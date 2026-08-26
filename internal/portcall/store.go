@@ -52,7 +52,7 @@ func (store *Store) Create(ctx context.Context, idempotencyKey string, request C
 	if err := request.Validate(); err != nil {
 		return PortCall{}, err
 	}
-	tx, err := store.pool.Begin(ctx)
+	tx, _, err := store.beginTenantTx(ctx)
 	if err != nil {
 		return PortCall{}, fmt.Errorf("begin create: %w", err)
 	}
@@ -146,7 +146,7 @@ func (store *Store) Transition(ctx context.Context, callID string, expectedVersi
 		}
 		return PortCall{}, ErrInvalidTransition
 	}
-	tx, err := store.pool.Begin(ctx)
+	tx, _, err := store.beginTenantTx(ctx)
 	if err != nil {
 		return PortCall{}, fmt.Errorf("begin transition: %w", err)
 	}
@@ -200,7 +200,7 @@ func (store *Store) DeclareDocument(ctx context.Context, callID string, request 
 	if err := request.Validate(); err != nil {
 		return DocumentDeclaration{}, err
 	}
-	tx, err := store.pool.Begin(ctx)
+	tx, _, err := store.beginTenantTx(ctx)
 	if err != nil {
 		return DocumentDeclaration{}, fmt.Errorf("begin document declaration: %w", err)
 	}
@@ -258,7 +258,7 @@ func (store *Store) DecideClearance(ctx context.Context, callID string, expected
 	if callID == "" || expectedVersion < 1 || (decision != ClearanceApproved && decision != ClearanceRejected) || reason == "" || reason != strings.TrimSpace(reason) || len(reason) > 1024 || decidedBy == "" || decidedBy != strings.TrimSpace(decidedBy) {
 		return Clearance{}, ErrClearanceInvalid
 	}
-	tx, err := store.pool.Begin(ctx)
+	tx, _, err := store.beginTenantTx(ctx)
 	if err != nil {
 		return Clearance{}, fmt.Errorf("begin clearance: %w", err)
 	}
@@ -342,7 +342,7 @@ func (store *Store) ReviewDocument(ctx context.Context, callID, documentID strin
 	if err != nil {
 		return DocumentDeclaration{}, ErrDocumentConflict
 	}
-	tx, err := store.pool.Begin(ctx)
+	tx, _, err := store.beginTenantTx(ctx)
 	if err != nil {
 		return DocumentDeclaration{}, fmt.Errorf("begin document review: %w", err)
 	}
@@ -392,7 +392,7 @@ func (store *Store) SupersedeDocument(ctx context.Context, callID string, reques
 	if !validateWorkflowText(request.OriginalDocumentID, 64) || !validateWorkflowText(request.ReplacementDocumentID, 64) || request.OriginalDocumentID == request.ReplacementDocumentID || !validateWorkflowText(request.Reason, 1024) || !validateWorkflowText(request.SupersededBy, 256) {
 		return ErrDocumentConflict
 	}
-	tx, err := store.pool.Begin(ctx)
+	tx, _, err := store.beginTenantTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -424,7 +424,7 @@ func (store *Store) AmendClearance(ctx context.Context, callID string, request C
 	if request.ExpectedVersion < 1 || (request.Decision != ClearanceApproved && request.Decision != ClearanceRejected) || !validateWorkflowText(request.Reason, 1024) || !validateWorkflowText(request.AmendedBy, 256) {
 		return Clearance{}, ErrClearanceInvalid
 	}
-	tx, err := store.pool.Begin(ctx)
+	tx, _, err := store.beginTenantTx(ctx)
 	if err != nil {
 		return Clearance{}, err
 	}
@@ -485,7 +485,7 @@ func (store *Store) RegisterAgencyProfile(ctx context.Context, profile AgencyPro
 		!strings.HasPrefix(profile.ProfileSHA256, "sha256:") {
 		return errors.New("agency profile registration is invalid")
 	}
-	tx, err := store.pool.Begin(ctx)
+	tx, _, err := store.beginTenantTx(ctx)
 	if err != nil {
 		return fmt.Errorf("begin agency profile registration: %w", err)
 	}
