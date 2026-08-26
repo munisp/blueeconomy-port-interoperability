@@ -120,7 +120,12 @@ func (store *Store) Create(ctx context.Context, idempotencyKey string, request C
 
 func (store *Store) Get(ctx context.Context, callID string) (PortCall, error) {
 	var call PortCall
-	err := store.pool.QueryRow(ctx, `
+	tx, _, err := store.beginTenantTx(ctx)
+	if err != nil {
+		return PortCall{}, fmt.Errorf("begin get port call: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	err = tx.QueryRow(ctx, `
 		SELECT call_id, vessel_imo, port_code, declaration_reference, submitted_by,
 			agency_profile_id, agency_profile_version, status, created_at, updated_at, version
 		FROM port_calls WHERE call_id = $1`, callID).
@@ -131,6 +136,9 @@ func (store *Store) Get(ctx context.Context, callID string) (PortCall, error) {
 	}
 	if err != nil {
 		return PortCall{}, fmt.Errorf("get port call: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return PortCall{}, fmt.Errorf("commit get port call: %w", err)
 	}
 	return call, nil
 }
