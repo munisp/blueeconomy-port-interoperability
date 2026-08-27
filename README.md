@@ -180,6 +180,12 @@ testsuite, envelope signatures, ledger determinism) need no services:
 go build ./... && go vet ./... && go test ./...
 ```
 
+Both the DB-gated store tests and `scripts/verify-local.sh` run in CI on every
+pull request (`.github/workflows/integration.yml`): PostgreSQL 16.4 runs as a
+digest-pinned `services:` container with a dedicated `blueeconomy_queue`
+database, and the E2E job runs the script unmodified. Service and server logs
+are uploaded as artifacts when a job fails.
+
 ## Runbook notes
 
 - **Startup failures are intentional**: every process exits when its security
