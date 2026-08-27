@@ -129,12 +129,14 @@ func TestSlotCapacityRaceEnforcesNoOverbooking(t *testing.T) {
 	wait.Wait()
 
 	var wins, conflicts int
-	for _, err := range outcomes {
+	loser := ""
+	for index, err := range outcomes {
 		switch {
 		case err == nil:
 			wins++
 		case errors.Is(err, ErrSlotUnavailable):
 			conflicts++
+			loser = []Booking{first, second}[index].BookingID
 		default:
 			t.Fatalf("unexpected race outcome: %v", err)
 		}
@@ -144,11 +146,11 @@ func TestSlotCapacityRaceEnforcesNoOverbooking(t *testing.T) {
 	}
 
 	// The loser must fail closed on retry as well.
-	found, err := env.store.Get(env.ctx, second.BookingID)
+	found, err := env.store.Get(env.ctx, loser)
 	if err != nil {
 		t.Fatalf("reload loser: %v", err)
 	}
-	if _, err := env.store.ReserveSlot(env.ctx, second.BookingID, slot.SlotID, found.Version, principal); !errors.Is(err, ErrSlotUnavailable) {
+	if _, err := env.store.ReserveSlot(env.ctx, loser, slot.SlotID, found.Version, principal); !errors.Is(err, ErrSlotUnavailable) {
 		t.Fatalf("retry after capacity exhaustion: got %v, want ErrSlotUnavailable", err)
 	}
 }

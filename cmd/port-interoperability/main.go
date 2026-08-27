@@ -19,6 +19,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/server"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
@@ -74,6 +75,15 @@ func run() error {
 		return fmt.Errorf("configure Temporal orchestrator: %w", err)
 	}
 	defer orchestrator.Close()
+	callUps, err := queue.NewTemporalCallUpOrchestrator(requiredEnv("TEMPORAL_ADDRESS"), requiredEnv("TEMPORAL_NAMESPACE"), requiredEnv("TEMPORAL_TASK_QUEUE"))
+	if err != nil {
+		return fmt.Errorf("configure Temporal call-up orchestrator: %w", err)
+	}
+	defer callUps.Close()
+	graceMinutes, err := strconv.Atoi(defaultEnv("CALLUP_GRACE_MINUTES", "90"))
+	if err != nil || graceMinutes < 1 {
+		return errors.New("CALLUP_GRACE_MINUTES must be a positive integer")
+	}
 
 	paths := strings.Split(migrationPaths, ",")
 	migrations := make([][]byte, 0, len(paths))
@@ -104,11 +114,21 @@ func run() error {
 			return fmt.Errorf("apply migration %d: %w", index+1, err)
 		}
 	}
+	bookingStore := booking.NewStore(pool)
+	queueStore, err := queue.NewStore(pool, bookingStore, time.Duration(graceMinutes)*time.Minute)
+	if err != nil {
+		return fmt.Errorf("configure queue store: %w", err)
+	}
+	// Call-up engine hook: booking slot releases promote the head of the
+	// terminal queue in the same transaction.
+	bookingStore.SetCapacityListener(queueStore)
 	handler, err := server.New(server.Config{
 		Store:               portcall.NewStore(pool),
-		Bookings:            booking.NewStore(pool),
+		Bookings:            bookingStore,
+		Queues:              queueStore,
 		Payments:            paymentsGateway,
 		Orchestrator:        orchestrator,
+		CallUps:             callUps,
 		AuthMode:            authMode,
 		TenantGateway:       tenantGateway,
 		NSWVerifier:         nswVerifier,

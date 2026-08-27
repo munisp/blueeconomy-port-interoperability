@@ -22,12 +22,41 @@ type Principal struct {
 	Role string
 }
 
+// CapacityListener is invoked inside the same transaction whenever a booking
+// releases terminal slot capacity (cancellation, expiry or completion). The
+// queue package implements it to call up the head of the terminal queue
+// atomically with the release.
+type CapacityListener interface {
+	CapacityReleased(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, terminalID string, principal Principal) error
+}
+
 type Store struct {
-	pool *pgxpool.Pool
+	pool     *pgxpool.Pool
+	listener CapacityListener
 }
 
 func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
+}
+
+// SetCapacityListener wires the capacity-release hook. A nil listener
+// disables it; releases then leave queue promotion to the sweeper.
+func (store *Store) SetCapacityListener(listener CapacityListener) {
+	store.listener = listener
+}
+
+// capacityReleased notifies the listener, when wired, that a booking left a
+// capacity-holding state. The caller passes the pre-transition booking; only
+// SLOT_RESERVED, PAID and GATE_APPROVED occupy terminal slot capacity.
+func (store *Store) capacityReleased(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, before Booking, principal Principal) error {
+	if store.listener == nil || before.SlotID == nil {
+		return nil
+	}
+	switch before.Status {
+	case StatusSlotReserved, StatusPaid, StatusGateApproved:
+		return store.listener.CapacityReleased(ctx, tx, claims, before.TerminalID, principal)
+	}
+	return nil
 }
 
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
@@ -233,6 +262,13 @@ func (store *Store) Create(ctx context.Context, request CreateRequest, principal
 		return nil
 	})
 	return booking, err
+}
+
+// CreateTx runs booking creation inside the caller's tenant transaction. The
+// queue package uses it to create the pending booking atomically with a queue
+// request.
+func (store *Store) CreateTx(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, request CreateRequest, principal Principal) (Booking, error) {
+	return store.createTx(ctx, tx, claims, request, principal)
 }
 
 func (store *Store) createTx(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, request CreateRequest, principal Principal) (Booking, error) {
@@ -660,6 +696,9 @@ func (store *Store) Complete(ctx context.Context, bookingID string, expectedVers
 		if err != nil {
 			return err
 		}
+		if err := store.capacityReleased(ctx, tx, claims, booking, principal); err != nil {
+			return err
+		}
 		completed = result
 		return nil
 	})
@@ -684,6 +723,9 @@ func (store *Store) Cancel(ctx context.Context, bookingID string, expectedVersio
 			updated.ReconciliationReason = &reason
 		}, "booking.cancelled", map[string]string{"reason": reason}, principal, "")
 		if err != nil {
+			return err
+		}
+		if err := store.capacityReleased(ctx, tx, claims, booking, principal); err != nil {
 			return err
 		}
 		cancelled = result
@@ -716,6 +758,9 @@ func (store *Store) ExpireDue(ctx context.Context, now time.Time, principal Prin
 		}
 		for _, booking := range due {
 			if _, err := store.transitionTx(ctx, tx, claims, booking, StatusExpired, nil, "booking.expired", nil, principal, ""); err != nil {
+				return err
+			}
+			if err := store.capacityReleased(ctx, tx, claims, booking, principal); err != nil {
 				return err
 			}
 			count++

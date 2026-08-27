@@ -1,6 +1,6 @@
 // ussd-gateway exposes the Africa's Talking-style USSD callback for eCallUp
-// booking status checks and slot booking. It fails closed without Redis
-// (sessions) and PostgreSQL (bookings).
+// booking status checks, slot booking and truck call-up queue entry/position.
+// It fails closed without Redis (sessions) and PostgreSQL (bookings, queue).
 package main
 
 import (
@@ -19,6 +19,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/ussd"
 	"github.com/redis/go-redis/v9"
@@ -81,11 +82,20 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	directory, err := booking.NewDirectory(booking.NewStore(pool), booking.Principal{ID: "ussd-gateway", Role: "trucker"})
+	bookingStore := booking.NewStore(pool)
+	directory, err := booking.NewDirectory(bookingStore, booking.Principal{ID: "ussd-gateway", Role: "trucker"})
 	if err != nil {
 		return err
 	}
-	handler, err := ussd.NewHandler(directory, sessions)
+	queueStore, err := queue.NewStore(pool, bookingStore, 0)
+	if err != nil {
+		return err
+	}
+	queueDirectory, err := queue.NewDirectory(queueStore, queue.Principal{ID: "ussd-gateway", Role: "trucker"})
+	if err != nil {
+		return err
+	}
+	handler, err := ussd.NewHandler(directory, queueDirectory, sessions)
 	if err != nil {
 		return err
 	}

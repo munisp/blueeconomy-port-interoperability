@@ -13,6 +13,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
 
@@ -21,8 +22,10 @@ import (
 type Config struct {
 	Store         *portcall.Store
 	Bookings      *booking.Store
+	Queues        *queue.Store
 	Payments      payments.Gateway
 	Orchestrator  booking.Orchestrator
+	CallUps       queue.CallUpOrchestrator
 	AuthMode      string
 	TenantGateway tenantctx.Verifier
 	NSWVerifier   *nswsecurity.Verifier
@@ -36,17 +39,19 @@ type Config struct {
 type Server struct {
 	store        *portcall.Store
 	bookings     *booking.Store
+	queues       *queue.Store
 	payments     payments.Gateway
 	orchestrator booking.Orchestrator
+	callUps      queue.CallUpOrchestrator
 	fgnShareBPS  int64
 }
 
 func New(config Config) (http.Handler, error) {
-	if config.Store == nil || config.Bookings == nil || config.Pool == nil {
-		return nil, errors.New("server requires port-call and booking stores")
+	if config.Store == nil || config.Bookings == nil || config.Queues == nil || config.Pool == nil {
+		return nil, errors.New("server requires port-call, booking and queue stores")
 	}
-	if config.Payments == nil || config.Orchestrator == nil {
-		return nil, errors.New("server requires a payments gateway and a workflow orchestrator")
+	if config.Payments == nil || config.Orchestrator == nil || config.CallUps == nil {
+		return nil, errors.New("server requires a payments gateway and workflow orchestrators")
 	}
 	if !config.TenantGateway.Ready() {
 		return nil, errors.New("tenant gateway verifier is not configured (key >= 32 bytes, issuer, audience)")
@@ -60,8 +65,10 @@ func New(config Config) (http.Handler, error) {
 	server := &Server{
 		store:        config.Store,
 		bookings:     config.Bookings,
+		queues:       config.Queues,
 		payments:     config.Payments,
 		orchestrator: config.Orchestrator,
+		callUps:      config.CallUps,
 		fgnShareBPS:  config.FGNShareBasisPoints,
 	}
 	api := http.NewServeMux()
@@ -77,6 +84,10 @@ func New(config Config) (http.Handler, error) {
 	api.HandleFunc("GET /v1/bookings/", server.bookingRead)
 	api.HandleFunc("POST /v1/bookings/", server.bookingOperation)
 	api.HandleFunc("POST /v1/gate/scans", server.gateScan)
+	api.HandleFunc("POST /v1/queue-requests", server.createQueueRequest)
+	api.HandleFunc("GET /v1/queue-requests/", server.queueRead)
+	api.HandleFunc("POST /v1/queue-requests/", server.queueOperation)
+	api.HandleFunc("GET /v1/terminals/", server.terminalQueue)
 
 	nswIngress, err := nswsecurity.NewIngress(nswsecurity.IngressConfig{
 		SignatureHeader: "X-NSW-Signature",

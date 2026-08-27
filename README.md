@@ -18,17 +18,20 @@ provide approved interface profiles and non-production endpoints.
    RS256 JWS (X-NSW-Signature, pinned JWKS, replay store)                         ▼
                                               internal/server ──► portcall.Store ─┐
                                                      │          booking.Store    │
+                                                     │          queue.Store      │
                                                      │  (all SQL runs inside     │
                                                      │   WithTenantTx + RLS)     │
                                                      ▼                            ▼
  USSD (Africa's Talking POST) ──► cmd/ussd-gateway ──► booking.Directory    PostgreSQL
         sessions in Redis (TTL, fail-closed)             │                  (migrations
-                                                        ▼                   0001–0009)
+                                                        ▼                   0001–0010)
  payments.Gateway (Mojaloop, HTTPS + bearer, idempotent request_id)
  booking.Orchestrator (Temporal): ECallUpBookingWorkflow
         receipt-check ─► gate-scan approval ─► TigerBeetle commit ─► audit commit
+ queue.CallUpOrchestrator (Temporal): ECallUpCallUpWorkflow
+        grace-window timer ─► forfeit ─► next-in-queue promotion (chain)
                                                      │
- platform_outbox ──► cmd/outbox-publisher ──► Kafka ports.booking.v1 / ports.gate.v1
+ platform_outbox ──► cmd/outbox-publisher ──► Kafka ports.booking.v1 / ports.gate.v1 / ports.queue.v1
         (transactional, at-least-once, event-id key, all-ISR acks,
          FHIR-aligned envelope v1.0 with provenance + sha256 signature)
 ```
@@ -82,17 +85,57 @@ eCallUp 2.0 truck booking (new):
   classification `INTERNAL`) to the transactional `platform_outbox`;
   `cmd/outbox-publisher` drains it to Kafka at-least-once with all-ISR acks.
 - USSD fallback (`cmd/ussd-gateway`): Africa's Talking-style POST callback
-  (`sessionId`, `phoneNumber`, `text`) with menus for booking status and slot
-  booking by ID; sessions live in Redis with a TTL and the gateway refuses to
-  start or serve without it.
+  (`sessionId`, `phoneNumber`, `text`) with menus for booking status, slot
+  booking by ID, queue entry and queue position; sessions live in Redis with a
+  TTL and the gateway refuses to start or serve without it.
+
+eCallUp 2.0 truck call-up queue (new):
+
+- Fail-closed state machine `REQUESTED -> QUEUED -> CALLED_UP -> EN_ROUTE ->
+  ARRIVED` with `EXPIRED` / `FORFEITED` / `CANCELLED` /
+  `RECONCILIATION_REQUIRED` terminal-style branches. Any unlisted transition is
+  rejected in code and by the database CHECK constraints; a called-up request
+  cannot exist without a grace deadline and an arrived one without an arrival
+  timestamp.
+- Per-terminal FIFO with priority classes (`PERISHABLE`, `PRIORITY`,
+  `STANDARD`): priority cargo jumps the standard queue but never reorders
+  within its class. Positions are assigned atomically under the terminal row
+  lock and pinned by `UNIQUE (terminal_id, position)` — exactly one winner per
+  position even under concurrent creators.
+- Queue requests are idempotent on `(tenant_id, idempotency_key)` and either
+  reference an existing booking or create a PENDING (DRAFTED) booking priced at
+  the terminal fee atomically in the same transaction.
+- Call-up engine: when terminal call-up capacity frees (booking slot release
+  via the in-transaction capacity listener on cancel/expire/complete, queue
+  arrival/cancellation/forfeiture, or the worker sweeper), the head-of-queue is
+  promoted to `CALLED_UP` with a grace window (`CALLUP_GRACE_MINUTES`, default
+  90). The `enforce_terminal_callup_capacity` trigger makes promotion beyond
+  `port_terminals.queue_capacity` impossible at the database level.
+- Grace expiry moves the call-up to `FORFEITED` with an audit event and chains
+  the next-in-queue promotion — enforced both by `ECallUpCallUpWorkflow`
+  (Temporal grace-window timer → forfeit, `arrival-confirmed` signal → arrival
+  check) and by the booking-worker sweeper, which also idempotently starts a
+  call-up workflow for every active call-up (workflow id =
+  `ecallup-callup-<queue_request_id>`).
+- Arrival after the grace deadline fails closed: the request is forfeited, the
+  audit event emitted and the chain promoted before `422` is returned.
+- REST: `POST /v1/queue-requests` (Idempotency-Key header), `GET
+  /v1/queue-requests/{id}`, `POST /v1/queue-requests/{id}/arrive|depart|cancel`
+  and the operator/npa-officer view `GET /v1/terminals/{id}/queue`; all behind
+  the tenant middleware. USSD menu options 3 and 4 request queue entry
+  (terminal code + plate, idempotent per session) and check the queue position
+  with the call-up state.
+- All queue mutations write FHIR-aligned envelopes to `ports.queue.v1` through
+  the same transactional `platform_outbox` (classification `INTERNAL`,
+  provenance principal + SHA-256 bundle signature).
 
 ## Processes
 
 | Command | Purpose | Required env (fail-closed) |
 | --- | --- | --- |
-| `cmd/port-interoperability` | HTTP API (port calls, bookings, gate scans, NSW ingress) | `DATABASE_URL`, `MIGRATION_PATH`, `PORT`, `AUTH_MODE=loopback_trusted_proxy`, `TENANT_GATEWAY_KEY` (≥32 bytes) / `_ISS` / `_AUD`, `NSW_JWKS_URL` (HTTPS) / `NSW_JWKS_PIN_SHA256` / `NSW_ALLOWED_KIDS` / `NSW_ISSUER` / `NSW_AUDIENCE`, `MOJALOOP_BASE_URL` (HTTPS) / `MOJALOOP_BEARER_TOKEN`, `TEMPORAL_ADDRESS` / `_NAMESPACE` / `_TASK_QUEUE`, `FGN_SHARE_BASIS_POINTS` |
+| `cmd/port-interoperability` | HTTP API (port calls, bookings, call-up queue, gate scans, NSW ingress) | `DATABASE_URL`, `MIGRATION_PATH`, `PORT`, `AUTH_MODE=loopback_trusted_proxy`, `TENANT_GATEWAY_KEY` (≥32 bytes) / `_ISS` / `_AUD`, `NSW_JWKS_URL` (HTTPS) / `NSW_JWKS_PIN_SHA256` / `NSW_ALLOWED_KIDS` / `NSW_ISSUER` / `NSW_AUDIENCE`, `MOJALOOP_BASE_URL` (HTTPS) / `MOJALOOP_BEARER_TOKEN`, `TEMPORAL_ADDRESS` / `_NAMESPACE` / `_TASK_QUEUE`, `FGN_SHARE_BASIS_POINTS` (optional `CALLUP_GRACE_MINUTES`, default 90) |
 | `cmd/ussd-gateway` | USSD callback handler | `REDIS_URL`, `DATABASE_URL`, `MIGRATION_PATH`, `PORT`, `USSD_TENANT_ID` (optional `USSD_SESSION_TTL_SECONDS`, default 300) |
-| `cmd/booking-worker` | Temporal worker for `ECallUpBookingWorkflow` | `TEMPORAL_ADDRESS` / `_NAMESPACE` / `_TASK_QUEUE`, `DATABASE_URL`, `TIGERBEETLE_CLUSTER_ID`, `TIGERBEETLE_ADDRESSES` |
+| `cmd/booking-worker` | Temporal worker for `ECallUpBookingWorkflow` and `ECallUpCallUpWorkflow`, plus the call-up sweeper | `TEMPORAL_ADDRESS` / `_NAMESPACE` / `_TASK_QUEUE`, `DATABASE_URL`, `TIGERBEETLE_CLUSTER_ID`, `TIGERBEETLE_ADDRESSES`, `WORKER_TENANT_ID` (optional `CALLUP_GRACE_MINUTES` default 90, `QUEUE_SWEEP_INTERVAL_SECONDS` default 60) |
 | `cmd/outbox-publisher` | Kafka publisher for `platform_outbox` | `DATABASE_URL`, `KAFKA_BROKERS` (optional `OUTBOX_BATCH_SIZE`, `OUTBOX_POLL_INTERVAL`) |
 
 Optional: `NSW_REPLAY_TTL_MINUTES` (default 1440).
@@ -106,7 +149,7 @@ scripts/verify-local.sh
 ```
 
 The script starts a real PostgreSQL 16.4 container, applies migrations
-0001–0009, mints local gateway tenant tokens, and verifies the tenant-wired
+0001–0010, mints local gateway tenant tokens, and verifies the tenant-wired
 port-call flow (create, replay, conflicts, documents, clearance), cross-tenant
 invisibility, the booking state machine over HTTP, slot capacity enforcement,
 offline reconciliation surfacing, gate denial for unpaid bookings and outbox
@@ -119,6 +162,15 @@ when the database is reachable:
 docker compose -f docker-compose.integration.yml up -d --wait postgres
 BOOKING_TEST_DATABASE_URL='postgres://blueeconomy:local-only-integration-password@127.0.0.1:55433/blueeconomy_port?sslmode=disable' \
   go test ./internal/booking/ -run 'TestSlot|TestOffline|TestGate|TestBooking' -v
+```
+
+PostgreSQL-backed queue store tests (position race, priority ordering, call-up
+chain, grace forfeiture, booking-release hook) run the same way; a dedicated
+database keeps the package race-safe against the booking schema reset:
+
+```bash
+QUEUE_TEST_DATABASE_URL='postgres://blueeconomy:local-only-integration-password@127.0.0.1:55433/blueeconomy_port?sslmode=disable' \
+  go test ./internal/queue/ -v
 ```
 
 Unit tests (state machine, JWS signature suite, USSD session flow, Temporal
@@ -142,6 +194,13 @@ go build ./... && go vet ./... && go test ./...
   `SELECT booking_id, reconciliation_reason FROM truck_bookings WHERE status =
   'RECONCILIATION_REQUIRED'` (with `SET app.tenant_id = ...`). Resolve by
   reserving a different slot via `POST /v1/bookings/{id}/reserve`.
+- **Call-up reconciliation**: queue requests stuck in
+  `RECONCILIATION_REQUIRED` are listed with
+  `SELECT queue_request_id, reconciliation_reason FROM truck_queue_requests
+  WHERE status = 'RECONCILIATION_REQUIRED'`; resolve with the requeue store
+  path (tail position, class preserved) or cancel. Forfeited call-ups carry
+  `forfeit_reason`; the sweeper and the Temporal grace timer both enforce the
+  deadline, so a stuck worker never silently extends a grace window.
 - **Outbox lag**: unpublished events are
   `SELECT count(*) FROM platform_outbox WHERE published_at IS NULL`. The
   publisher is idempotent — restarting it never duplicates business effects,

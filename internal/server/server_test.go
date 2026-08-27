@@ -13,8 +13,19 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
+
+// mustQueueStore builds a queue store without a database for fail-closed
+// constructor tests; routes backed by it are exercised against PostgreSQL.
+func mustQueueStore() *queue.Store {
+	store, err := queue.NewStore(nil, booking.NewStore(nil), time.Minute)
+	if err != nil {
+		panic(err)
+	}
+	return store
+}
 
 type fakePayments struct{}
 
@@ -33,12 +44,24 @@ func (fakeOrchestrator) ObserverState(context.Context, string) (booking.Observer
 	return booking.ObserverState{}, nil
 }
 
+type fakeCallUps struct{}
+
+func (fakeCallUps) StartCallUpWorkflow(context.Context, queue.CallUpWorkflowInput) error {
+	return nil
+}
+func (fakeCallUps) SignalArrivalConfirmed(context.Context, string, string) error { return nil }
+func (fakeCallUps) CallUpObserverState(context.Context, string) (queue.CallUpObserverState, error) {
+	return queue.CallUpObserverState{}, nil
+}
+
 func testConfig() Config {
 	return Config{
 		Store:        portcall.NewStore(nil),
 		Bookings:     booking.NewStore(nil),
+		Queues:       mustQueueStore(),
 		Payments:     fakePayments{},
 		Orchestrator: fakeOrchestrator{},
+		CallUps:      fakeCallUps{},
 		AuthMode:     AuthModeLoopbackTrustedProxy,
 		TenantGateway: tenantctx.Verifier{
 			Key:      []byte("0123456789abcdef0123456789abcdef"),
@@ -70,6 +93,16 @@ func TestNewFailsClosedWithoutDependencies(t *testing.T) {
 	config.Orchestrator = nil
 	if _, err := New(config); err == nil {
 		t.Fatal("missing orchestrator must fail closed")
+	}
+	config = testConfig()
+	config.Queues = nil
+	if _, err := New(config); err == nil {
+		t.Fatal("missing queue store must fail closed")
+	}
+	config = testConfig()
+	config.CallUps = nil
+	if _, err := New(config); err == nil {
+		t.Fatal("missing call-up orchestrator must fail closed")
 	}
 	config = testConfig()
 	config.FGNShareBasisPoints = 0

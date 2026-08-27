@@ -38,7 +38,7 @@ GOFLAGS='' go build -o "$server_binary" ./cmd/port-interoperability
 TENANT_GATEWAY_KEY='local-integration-gateway-key-32b'
 DATABASE_URL='postgres://blueeconomy:local-only-integration-password@127.0.0.1:55433/blueeconomy_port?sslmode=disable'
 export DATABASE_URL \
-  MIGRATION_PATH="$repo_root/db/migrations/0001_port_calls.sql,$repo_root/db/migrations/0002_documents_clearance.sql,$repo_root/db/migrations/0003_document_review.sql,$repo_root/db/migrations/0004_document_supersession_clearance_amendment.sql,$repo_root/db/migrations/0005_agency_profiles.sql,$repo_root/db/migrations/0006_profile_binding_and_append_only_ledger.sql,$repo_root/db/migrations/0007_tenant_expand.sql,$repo_root/db/migrations/0008_tenant_rls_enforce.sql,$repo_root/db/migrations/0009_ecallup_booking.sql" \
+  MIGRATION_PATH="$repo_root/db/migrations/0001_port_calls.sql,$repo_root/db/migrations/0002_documents_clearance.sql,$repo_root/db/migrations/0003_document_review.sql,$repo_root/db/migrations/0004_document_supersession_clearance_amendment.sql,$repo_root/db/migrations/0005_agency_profiles.sql,$repo_root/db/migrations/0006_profile_binding_and_append_only_ledger.sql,$repo_root/db/migrations/0007_tenant_expand.sql,$repo_root/db/migrations/0008_tenant_rls_enforce.sql,$repo_root/db/migrations/0009_ecallup_booking.sql,$repo_root/db/migrations/0010_queue_callup.sql" \
   PORT=18080 \
   AUTH_MODE=loopback_trusted_proxy \
   TENANT_GATEWAY_KEY \

@@ -47,6 +47,28 @@ func TestMessageBuildsCompliantEnvelope(t *testing.T) {
 	}
 }
 
+func TestMessageBuildsQueueEnvelope(t *testing.T) {
+	envelope, err := Message(
+		"queue.called_up", TopicQueue, "queue-req-0001", "queue-request-0001",
+		json.RawMessage(`{"queue_request_id":"queue-request-0001","status":"CALLED_UP"}`),
+		map[string]string{"terminal-id": "APAPA-T1", "priority-class": "PERISHABLE"},
+		Provenance{PrincipalID: "callup-engine", PrincipalRole: "callup-engine"},
+		time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatalf("build queue envelope: %v", err)
+	}
+	if envelope.Classification != ClassificationIntern || envelope.EventType != "queue.called_up" {
+		t.Fatalf("queue envelope metadata = %#v", envelope)
+	}
+	if envelope.Provenance.PrincipalID != "callup-engine" || envelope.Provenance.PrincipalRole != "callup-engine" {
+		t.Fatalf("queue envelope provenance = %#v", envelope.Provenance)
+	}
+	if !envelope.VerifySignature() {
+		t.Fatal("queue envelope provenance signature must verify")
+	}
+}
+
 func TestMessageSignatureDetectsTampering(t *testing.T) {
 	envelope, err := Message(
 		"gate.scan_approved", TopicGate, "req-0002", "scan-0001",

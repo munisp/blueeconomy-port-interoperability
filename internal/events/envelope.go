@@ -1,7 +1,7 @@
 // Package events builds the platform FHIR-aligned event envelope used for the
-// ports.booking.v1 and ports.gate.v1 Kafka topics. Every envelope carries a FHIR
-// R4 message Bundle entry and a provenance block binding the event to its
-// principal, payload signature and ledger commit.
+// ports.booking.v1, ports.gate.v1 and ports.queue.v1 Kafka topics. Every
+// envelope carries a FHIR R4 message Bundle entry and a provenance block
+// binding the event to its principal, payload signature and ledger commit.
 package events
 
 import (
@@ -23,6 +23,7 @@ const (
 
 	TopicBooking = "ports.booking.v1"
 	TopicGate    = "ports.gate.v1"
+	TopicQueue   = "ports.queue.v1"
 )
 
 // Provenance binds an event to the acting principal and the integrity chain.
@@ -83,7 +84,7 @@ type fhirBundle struct {
 // entry. The provenance signature is the SHA-256 of the exact bundle bytes, so
 // any tampering with the message entry invalidates the envelope.
 func Message(eventType, topic, correlationID, subjectID string, payloadJSON json.RawMessage, extensions map[string]string, principal Provenance, occurredAt time.Time) (Envelope, error) {
-	if strings.TrimSpace(eventType) == "" || (topic != TopicBooking && topic != TopicGate) {
+	if strings.TrimSpace(eventType) == "" || (topic != TopicBooking && topic != TopicGate && topic != TopicQueue) {
 		return Envelope{}, errors.New("event type and a ports.* v1 topic are required")
 	}
 	if strings.TrimSpace(correlationID) == "" || strings.TrimSpace(subjectID) == "" {
