@@ -9,12 +9,18 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/server"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
 
 func main() {
@@ -32,6 +38,43 @@ func run() error {
 	if authMode != server.AuthModeLoopbackTrustedProxy {
 		return fmt.Errorf("AUTH_MODE must be %q until a verified Ministry OIDC edge is configured", server.AuthModeLoopbackTrustedProxy)
 	}
+	tenantGateway := tenantctx.Verifier{
+		Key:      []byte(requiredEnv("TENANT_GATEWAY_KEY")),
+		Issuer:   requiredEnv("TENANT_GATEWAY_ISS"),
+		Audience: requiredEnv("TENANT_GATEWAY_AUD"),
+	}
+	if !tenantGateway.Ready() {
+		return errors.New("TENANT_GATEWAY_KEY must be at least 32 bytes and issuer/audience must be set")
+	}
+	nswVerifier, err := nswsecurity.New(nswsecurity.Policy{
+		JWKSURL:           requiredEnv("NSW_JWKS_URL"),
+		PinnedJWKSHA256:   requiredEnv("NSW_JWKS_PIN_SHA256"),
+		AllowedAlgorithms: map[string]bool{"RS256": true},
+		AllowedKIDs:       allowedKIDs(requiredEnv("NSW_ALLOWED_KIDS")),
+		ExpectedIssuer:    requiredEnv("NSW_ISSUER"),
+		ExpectedAudience:  requiredEnv("NSW_AUDIENCE"),
+	})
+	if err != nil {
+		return fmt.Errorf("configure NSW ingress verifier: %w", err)
+	}
+	replayTTLMinutes, err := strconv.Atoi(defaultEnv("NSW_REPLAY_TTL_MINUTES", "1440"))
+	if err != nil || replayTTLMinutes < 1 {
+		return errors.New("NSW_REPLAY_TTL_MINUTES must be a positive integer")
+	}
+	fgnShareBPS, err := strconv.ParseInt(requiredEnv("FGN_SHARE_BASIS_POINTS"), 10, 64)
+	if err != nil {
+		return fmt.Errorf("FGN_SHARE_BASIS_POINTS must be an integer: %w", err)
+	}
+	paymentsGateway, err := payments.NewMojaloop(requiredEnv("MOJALOOP_BASE_URL"), requiredEnv("MOJALOOP_BEARER_TOKEN"), nil)
+	if err != nil {
+		return fmt.Errorf("configure Mojaloop gateway: %w", err)
+	}
+	orchestrator, err := booking.NewTemporalOrchestrator(requiredEnv("TEMPORAL_ADDRESS"), requiredEnv("TEMPORAL_NAMESPACE"), requiredEnv("TEMPORAL_TASK_QUEUE"))
+	if err != nil {
+		return fmt.Errorf("configure Temporal orchestrator: %w", err)
+	}
+	defer orchestrator.Close()
+
 	paths := strings.Split(migrationPaths, ",")
 	migrations := make([][]byte, 0, len(paths))
 	for _, migrationPath := range paths {
@@ -47,19 +90,38 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	store, err := portcall.Open(ctx, databaseURL)
+	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
-		return err
+		return fmt.Errorf("open postgres: %w", err)
 	}
-	defer store.Close()
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return fmt.Errorf("ping postgres: %w", err)
+	}
+	defer pool.Close()
 	for index, migration := range migrations {
-		if _, err := store.Exec(ctx, string(migration)); err != nil {
+		if _, err := pool.Exec(ctx, string(migration)); err != nil {
 			return fmt.Errorf("apply migration %d: %w", index+1, err)
 		}
 	}
-	server := &http.Server{
+	handler, err := server.New(server.Config{
+		Store:               portcall.NewStore(pool),
+		Bookings:            booking.NewStore(pool),
+		Payments:            paymentsGateway,
+		Orchestrator:        orchestrator,
+		AuthMode:            authMode,
+		TenantGateway:       tenantGateway,
+		NSWVerifier:         nswVerifier,
+		Pool:                pool,
+		FGNShareBasisPoints: fgnShareBPS,
+		NSWReplayTTL:        time.Duration(replayTTLMinutes) * time.Minute,
+	})
+	if err != nil {
+		return fmt.Errorf("build server: %w", err)
+	}
+	httpServer := &http.Server{
 		Addr:              ":" + port,
-		Handler:           server.New(store, authMode),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -69,13 +131,24 @@ func run() error {
 		<-ctx.Done()
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = server.Shutdown(shutdownContext)
+		_ = httpServer.Shutdown(shutdownContext)
 	}()
 	log.Printf("port-interoperability listening on :%s", port)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
+}
+
+func allowedKIDs(value string) map[string]time.Time {
+	kids := map[string]time.Time{}
+	for _, kid := range strings.Split(value, ",") {
+		kid = strings.TrimSpace(kid)
+		if kid != "" {
+			kids[kid] = time.Time{}
+		}
+	}
+	return kids
 }
 
 func requiredEnv(name string) string {
@@ -84,4 +157,11 @@ func requiredEnv(name string) string {
 		log.Fatalf("%s must be set", name)
 	}
 	return value
+}
+
+func defaultEnv(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
 }

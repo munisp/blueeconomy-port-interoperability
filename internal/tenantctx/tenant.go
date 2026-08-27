@@ -52,6 +52,21 @@ func Tenant(request context.Context) (Claims, error) {
 	return claims, nil
 }
 
+// WithClaims attaches already-verified claims to a context. It is used by ingress
+// paths (e.g. the NSW JWS authority ingress) that verify identity through a
+// non-Bearer mechanism and then need the same tenant-scoped storage behaviour.
+func WithClaims(ctx context.Context, claims Claims) (context.Context, error) {
+	if !validTenantID(claims.TenantID) || strings.TrimSpace(claims.Subject) == "" {
+		return nil, errors.New("cannot attach unverified tenant claims")
+	}
+	return context.WithValue(ctx, contextKey{}, claims), nil
+}
+
+// Ready reports whether the verifier has all required fail-closed configuration.
+func (verifier Verifier) Ready() bool {
+	return len(verifier.Key) >= 32 && verifier.Issuer != "" && verifier.Audience != ""
+}
+
 func (verifier Verifier) Verify(token string) (Claims, error) {
 	if len(verifier.Key) < 32 || verifier.Issuer == "" || verifier.Audience == "" {
 		return Claims{}, errors.New("tenant verifier is not configured")

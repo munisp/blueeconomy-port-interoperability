@@ -2,7 +2,15 @@ openapi: 3.1.0
 info:
   title: Blue Economy Port Interoperability API
   version: 0.1.0
-  description: Implemented local port-call workflow; IMO/NSW partner profiles remain separate acceptance gates.
+  description: >-
+    Implemented local port-call workflow; IMO/NSW partner profiles remain
+    separate acceptance gates. The eCallUp booking, slot, gate-scan and NSW
+    ingress routes (/v1/bookings, /v1/slots, /v1/terminals, /v1/gate/scans,
+    /v1/nsw/port-calls) are wired and tenant-isolated but are documented in
+    README.md until the Ministry approves their external interface profile.
+    All /v1 routes require the loopback trusted-proxy headers plus a validated
+    HS256 gateway tenant token (Authorization: Bearer); the NSW ingress route
+    instead requires an RS256 authority JWS in X-NSW-Signature.
 servers:
   - url: http://localhost:18080
 paths:

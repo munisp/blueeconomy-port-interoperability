@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -15,6 +14,18 @@ import (
 // Implementations should use a PostgreSQL unique key and return (false,nil) on replay.
 type ReplayStore interface {
 	Reserve(ctx context.Context, replayHash string, expiresAt time.Time) (bool, error)
+}
+
+type claimsContextKey struct{}
+
+// ClaimsFrom returns the validated NSW authority claims attached by the ingress
+// middleware. Handlers behind NewIngress must fail closed when claims are absent.
+func ClaimsFrom(ctx context.Context) (Claims, error) {
+	claims, ok := ctx.Value(claimsContextKey{}).(Claims)
+	if !ok {
+		return Claims{}, errors.New("validated NSW authority claims are required")
+	}
+	return claims, nil
 }
 
 type IngressConfig struct {
@@ -39,16 +50,12 @@ func NewIngress(config IngressConfig, next http.Handler) (http.Handler, error) {
 			return
 		}
 		now := config.Now().UTC()
-		if err := config.Verifier.Verify(r.Context(), compact, now); err != nil {
+		claims, err := config.Verifier.Verify(r.Context(), compact, now)
+		if err != nil {
 			http.Error(w, "authority signature rejected", http.StatusUnauthorized)
 			return
 		}
-		jti, err := protectedJTI(compact)
-		if err != nil {
-			http.Error(w, "authority signature missing replay identity", http.StatusUnauthorized)
-			return
-		}
-		sum := sha256.Sum256([]byte(jti))
+		sum := sha256.Sum256([]byte(claims.JTI))
 		reserved, err := config.ReplayStore.Reserve(r.Context(), base64.RawURLEncoding.EncodeToString(sum[:]), now.Add(config.ReplayTTL))
 		if err != nil {
 			http.Error(w, "replay store unavailable", http.StatusServiceUnavailable)
@@ -58,24 +65,6 @@ func NewIngress(config IngressConfig, next http.Handler) (http.Handler, error) {
 			http.Error(w, "replayed authority message", http.StatusConflict)
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), claimsContextKey{}, claims)))
 	}), nil
-}
-
-func protectedJTI(compact string) (string, error) {
-	parts := strings.Split(compact, ".")
-	if len(parts) != 3 {
-		return "", errors.New("invalid compact JWS")
-	}
-	bytes, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return "", err
-	}
-	var header struct {
-		JTI string `json:"jti"`
-	}
-	if err := json.Unmarshal(bytes, &header); err != nil || strings.TrimSpace(header.JTI) == "" {
-		return "", errors.New("missing jti")
-	}
-	return header.JTI, nil
 }
