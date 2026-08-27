@@ -21,6 +21,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/server"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/telemetry"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
 
@@ -100,6 +101,26 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	telemetryConfig, err := telemetry.LoadConfig("blueeconomy-port-interoperability")
+	if err != nil {
+		return fmt.Errorf("load telemetry config: %w", err)
+	}
+	pipeline, err := telemetry.Setup(ctx, telemetryConfig)
+	if err != nil {
+		return fmt.Errorf("setup telemetry: %w", err)
+	}
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := pipeline.Shutdown(shutdownContext); err != nil {
+			log.Printf("telemetry shutdown: %v", err)
+		}
+	}()
+	if pipeline.Enabled() {
+		log.Printf("telemetry: OTLP gRPC traces exporting to %s; Prometheus metrics on GET /metrics", telemetryConfig.Endpoint)
+	} else {
+		log.Printf("telemetry: tracing disabled (OTEL_EXPORTER_OTLP_ENDPOINT not set); running with an explicit no-op tracer, Prometheus metrics on GET /metrics")
+	}
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		return fmt.Errorf("open postgres: %w", err)
@@ -135,6 +156,7 @@ func run() error {
 		Pool:                pool,
 		FGNShareBasisPoints: fgnShareBPS,
 		NSWReplayTTL:        time.Duration(replayTTLMinutes) * time.Minute,
+		Telemetry:           pipeline,
 	})
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)

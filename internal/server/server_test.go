@@ -14,6 +14,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/telemetry"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
 
@@ -72,7 +73,18 @@ func testConfig() Config {
 		Pool:                nil,
 		FGNShareBasisPoints: 250,
 		NSWReplayTTL:        time.Hour,
+		Telemetry:           mustDisabledTelemetry(),
 	}
+}
+
+// mustDisabledTelemetry builds a disabled (no-op) telemetry pipeline for
+// wiring tests. The pipeline is process-lifetime; tests never scrape it.
+func mustDisabledTelemetry() *telemetry.Telemetry {
+	pipeline, err := telemetry.Setup(context.Background(), telemetry.Config{ServiceName: "port-interoperability-test"})
+	if err != nil {
+		panic(err)
+	}
+	return pipeline
 }
 
 func TestNewFailsClosedWithoutDependencies(t *testing.T) {
@@ -132,6 +144,24 @@ func newWiredHandler(t *testing.T) http.Handler {
 		t.Fatalf("wire server: %v", err)
 	}
 	return handler
+}
+
+func TestMetricsEndpointIsServed(t *testing.T) {
+	handler := newWiredHandler(t)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /metrics must serve 200, got %d", response.Code)
+	}
+}
+
+func TestReadyzFailsClosedWhenStoreUnreachable(t *testing.T) {
+	handler := newWiredHandler(t) // wired pool targets 127.0.0.1:1 (unreachable)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /readyz with an unreachable store must fail closed with 503, got %d", response.Code)
+	}
 }
 
 func TestHealthzIsPublic(t *testing.T) {

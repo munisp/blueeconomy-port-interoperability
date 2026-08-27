@@ -10,6 +10,9 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type contextKey struct{}
@@ -40,6 +43,8 @@ func Middleware(verifier Verifier, next http.Handler) http.Handler {
 			http.Error(response, "invalid gateway tenant token", http.StatusUnauthorized)
 			return
 		}
+		// Annotate the active trace span (no-op when telemetry is disabled).
+		trace.SpanFromContext(request.Context()).SetAttributes(attribute.String("blueeconomy.tenant_id", claims.TenantID))
 		next.ServeHTTP(response, request.WithContext(context.WithValue(request.Context(), contextKey{}, claims)))
 	})
 }

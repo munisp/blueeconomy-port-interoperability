@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/telemetry"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
 
@@ -34,6 +36,8 @@ type Config struct {
 	FGNShareBasisPoints int64
 	// NSWReplayTTL bounds how long ingress replay hashes are retained.
 	NSWReplayTTL time.Duration
+	// Telemetry is the required OpenTelemetry/Prometheus pipeline.
+	Telemetry *telemetry.Telemetry
 }
 
 type Server struct {
@@ -61,6 +65,9 @@ func New(config Config) (http.Handler, error) {
 	}
 	if config.FGNShareBasisPoints <= 0 || config.FGNShareBasisPoints >= 10000 {
 		return nil, errors.New("FGN_SHARE_BASIS_POINTS must be between 1 and 9999")
+	}
+	if config.Telemetry == nil {
+		return nil, errors.New("telemetry pipeline is required (fail-closed); use telemetry.Setup with a disabled config for no-op tracing")
 	}
 	server := &Server{
 		store:        config.Store,
@@ -101,12 +108,14 @@ func New(config Config) (http.Handler, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", server.health)
+	mux.HandleFunc("GET /readyz", server.readyz(config.Pool))
+	mux.Handle("GET /metrics", config.Telemetry.MetricsHandler())
 	// Tenant middleware (HS256 gateway token) protects all tenant API routes.
 	mux.Handle("/v1/", requireAuthentication(config.AuthMode, tenantctx.Middleware(config.TenantGateway, api)))
 	// NSW ingress uses asymmetric JWS authority signatures instead of the
 	// gateway token; it is mounted last so the more specific pattern wins.
 	mux.Handle("POST /v1/nsw/port-calls", requireAuthentication(config.AuthMode, nswIngress))
-	return requestLimit(mux), nil
+	return config.Telemetry.Middleware(requestLimit(mux)), nil
 }
 
 func requestLimit(next http.Handler) http.Handler {
@@ -115,6 +124,20 @@ func requestLimit(next http.Handler) http.Handler {
 
 func (server *Server) health(response http.ResponseWriter, _ *http.Request) {
 	writeJSON(response, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// readyz verifies the PostgreSQL pool is reachable; it fails closed when the
+// pool cannot serve within the probe budget.
+func (server *Server) readyz(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(response http.ResponseWriter, request *http.Request) {
+		ctx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
+		defer cancel()
+		if err := pool.Ping(ctx); err != nil {
+			writeError(response, http.StatusServiceUnavailable, "store is not reachable")
+			return
+		}
+		writeJSON(response, http.StatusOK, map[string]string{"status": "ready"})
+	}
 }
 
 func (server *Server) partnerCapabilities(response http.ResponseWriter, request *http.Request) {

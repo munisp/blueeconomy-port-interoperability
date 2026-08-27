@@ -36,6 +36,22 @@ provide approved interface profiles and non-production endpoints.
          FHIR-aligned envelope v1.0 with provenance + sha256 signature)
 ```
 
+## Telemetry
+
+`internal/telemetry` wires OpenTelemetry tracing and Prometheus metrics into
+`cmd/port-interoperability`. Every request gets a server span renamed to the
+matched route pattern plus request count/duration histograms on
+`GET /metrics`; the validated tenant claim and booking operations are recorded
+as span attributes. Tracing is **disabled by default** with an explicit no-op
+tracer and a startup log line; setting `OTEL_EXPORTER_OTLP_ENDPOINT`
+(`host:port`, no scheme/credentials) enables OTLP gRPC export.
+`OTEL_EXPORTER_OTLP_INSECURE`, `OTEL_SERVICE_NAME` and `OTEL_SDK_DISABLED`
+(true/false only) are honoured. Telemetry configuration fails closed on
+malformed or contradictory values, and `server.Config.Telemetry` is a required
+dependency. Metrics are local-only (private Prometheus registry). The service
+also exposes `GET /readyz`, which fails closed (503) when the PostgreSQL pool
+is unreachable.
+
 ## Implemented controls
 
 Port calls (existing, now tenant-wired):

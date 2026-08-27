@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
@@ -149,6 +152,12 @@ func (server *Server) bookingOperation(response http.ResponseWriter, request *ht
 		writeError(response, http.StatusNotFound, "booking route not found")
 		return
 	}
+	// Annotate the active span with the booking operation dispatch (no-op when
+	// telemetry is disabled).
+	trace.SpanFromContext(request.Context()).SetAttributes(
+		attribute.String("ecallup.booking_id", parts[0]),
+		attribute.String("ecallup.booking.operation", parts[1]),
+	)
 	switch parts[1] {
 	case "reserve":
 		server.reserveSlot(response, request, parts[0])
