@@ -90,6 +90,24 @@ func (env drainEnv) withTenant(t *testing.T, work func(pgx.Tx)) {
 	}
 }
 
+// withTenantRead runs a verification read inside a tenant-bound transaction
+// (set_config app.tenant_id), exactly like the production store paths:
+// nsw_delivery is RLS-enforced with FORCE and the test role does not bypass
+// RLS, so a raw pool read returns zero rows. The transaction rolls back when
+// the read completes.
+func (env drainEnv) withTenantRead(t *testing.T, work func(pgx.Tx)) {
+	t.Helper()
+	tx, err := env.pool.Begin(env.ctx)
+	if err != nil {
+		t.Fatalf("begin tenant-bound read: %v", err)
+	}
+	defer tx.Rollback(env.ctx)
+	if _, err := tx.Exec(env.ctx, "SELECT set_config('app.tenant_id', $1, true)", env.tenantID); err != nil {
+		t.Fatalf("bind tenant for read: %v", err)
+	}
+	work(tx)
+}
+
 func bookingEnvelope(t *testing.T, eventType, requestID, bookingID string) []byte {
 	t.Helper()
 	payload := json.RawMessage(`{"booking_id":"` + bookingID + `"}`)
@@ -198,15 +216,17 @@ func TestDrainDeliversClearedDeclarations(t *testing.T) {
 	request := <-fixture.capture
 	fixture.verifySignature(t, request)
 	var reference string
-	if err := env.pool.QueryRow(env.ctx, `SELECT call_reference FROM nsw_delivery WHERE event_id=$1`, eventID).Scan(&reference); err != nil {
-		t.Fatalf("query delivery reference: %v", err)
-	}
+	var bridged int
+	env.withTenantRead(t, func(tx pgx.Tx) {
+		if err := tx.QueryRow(env.ctx, `SELECT call_reference FROM nsw_delivery WHERE event_id=$1`, eventID).Scan(&reference); err != nil {
+			t.Fatalf("query delivery reference: %v", err)
+		}
+		if err := tx.QueryRow(env.ctx, `SELECT count(*) FROM nsw_delivery`).Scan(&bridged); err != nil {
+			t.Fatalf("count deliveries: %v", err)
+		}
+	})
 	if reference != "NCS-2026-ABC123" {
 		t.Fatalf("call reference = %q, want the declaration ref", reference)
-	}
-	var bridged int
-	if err := env.pool.QueryRow(env.ctx, `SELECT count(*) FROM nsw_delivery`).Scan(&bridged); err != nil {
-		t.Fatalf("count deliveries: %v", err)
 	}
 	if bridged != 1 {
 		t.Fatalf("deliveries = %d, want 1 (submitted events are not bridged)", bridged)
@@ -273,22 +293,27 @@ func TestDrainDeliversOutboxEventsSignedAndTracksState(t *testing.T) {
 		t.Fatalf("booking.paid event was not delivered; got %v", seen)
 	}
 	var statuses map[string]string = map[string]string{}
-	rows, err := env.pool.Query(env.ctx, `SELECT event_id::text, status, attempts FROM nsw_delivery`)
-	if err != nil {
-		t.Fatalf("query deliveries: %v", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var eventID, status string
-		var attempts int
-		if err := rows.Scan(&eventID, &status, &attempts); err != nil {
-			t.Fatalf("scan delivery: %v", err)
+	env.withTenantRead(t, func(tx pgx.Tx) {
+		rows, err := tx.Query(env.ctx, `SELECT event_id::text, status, attempts FROM nsw_delivery`)
+		if err != nil {
+			t.Fatalf("query deliveries: %v", err)
 		}
-		if status != StatusDelivered || attempts != 1 {
-			t.Fatalf("delivery %s status=%s attempts=%d, want DELIVERED/1", eventID, status, attempts)
+		defer rows.Close()
+		for rows.Next() {
+			var eventID, status string
+			var attempts int
+			if err := rows.Scan(&eventID, &status, &attempts); err != nil {
+				t.Fatalf("scan delivery: %v", err)
+			}
+			if status != StatusDelivered || attempts != 1 {
+				t.Fatalf("delivery %s status=%s attempts=%d, want DELIVERED/1", eventID, status, attempts)
+			}
+			statuses[eventID] = status
 		}
-		statuses[eventID] = status
-	}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate deliveries: %v", err)
+		}
+	})
 	if len(statuses) != 2 || statuses[bookingEventID] != StatusDelivered || statuses[clearanceEventID] != StatusDelivered {
 		t.Fatalf("delivery ledger = %v, want both events DELIVERED", statuses)
 	}
@@ -319,9 +344,11 @@ func TestDrainFailsPermanentlyAfterAttemptBudget(t *testing.T) {
 		t.Fatalf("delivered = %d, want 0 against a failing endpoint", delivered)
 	}
 	var failed int
-	if err := env.pool.QueryRow(env.ctx, `SELECT count(*) FROM nsw_delivery WHERE status='FAILED_PERMANENT' AND last_error <> ''`).Scan(&failed); err != nil {
-		t.Fatalf("count permanent failures: %v", err)
-	}
+	env.withTenantRead(t, func(tx pgx.Tx) {
+		if err := tx.QueryRow(env.ctx, `SELECT count(*) FROM nsw_delivery WHERE status='FAILED_PERMANENT' AND last_error <> ''`).Scan(&failed); err != nil {
+			t.Fatalf("count permanent failures: %v", err)
+		}
+	})
 	if failed != 2 {
 		t.Fatalf("FAILED_PERMANENT rows = %d, want 2 — nothing silently dropped", failed)
 	}

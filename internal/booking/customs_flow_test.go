@@ -10,6 +10,33 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
 
+// customsValidationReason reads the persisted reason code inside a
+// tenant-bound transaction (set_config app.tenant_id), exactly like the
+// production store paths: customs_validations is RLS-enforced with FORCE,
+// and the test role does not bypass RLS, so a raw pool read returns zero
+// rows.
+func (env testEnv) customsValidationReason(t *testing.T, bookingID string) string {
+	t.Helper()
+	claims, err := tenantctx.Tenant(env.ctx)
+	if err != nil {
+		t.Fatalf("resolve tenant claims: %v", err)
+	}
+	tx, err := env.store.Pool().Begin(env.ctx)
+	if err != nil {
+		t.Fatalf("begin tenant-bound read: %v", err)
+	}
+	defer tx.Rollback(env.ctx)
+	if _, err := tx.Exec(env.ctx, "SELECT set_config('app.tenant_id', $1, true)", claims.TenantID); err != nil {
+		t.Fatalf("bind tenant for read: %v", err)
+	}
+	var reasonCode string
+	if err := tx.QueryRow(env.ctx,
+		`SELECT reason_code FROM customs_validations WHERE booking_id=$1`, bookingID).Scan(&reasonCode); err != nil {
+		t.Fatalf("load validation reason: %v", err)
+	}
+	return reasonCode
+}
+
 // These tests run against a real PostgreSQL when BOOKING_TEST_DATABASE_URL is
 // set (see store_test.go); they are skipped otherwise. They cover the Nigeria
 // Customs cross-validation gate: state machine, persisted decisions, gate
@@ -164,12 +191,7 @@ func TestCustomsMismatchRejectsBookingWithReasonCode(t *testing.T) {
 	if resolved.Status != StatusRejected {
 		t.Fatalf("resolved status = %s, want REJECTED", resolved.Status)
 	}
-	var reasonCode string
-	if err := env.store.Pool().QueryRow(env.ctx,
-		`SELECT reason_code FROM customs_validations WHERE booking_id=$1`, booking.BookingID).Scan(&reasonCode); err != nil {
-		t.Fatalf("load validation reason: %v", err)
-	}
-	if reasonCode != customs.ReasonConsigneeMismatch {
+	if reasonCode := env.customsValidationReason(t, booking.BookingID); reasonCode != customs.ReasonConsigneeMismatch {
 		t.Fatalf("reason_code = %s, want %s", reasonCode, customs.ReasonConsigneeMismatch)
 	}
 	// A rejected booking can only be cancelled afterwards.
