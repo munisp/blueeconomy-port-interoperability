@@ -112,37 +112,50 @@ func (runner *Runner) drainTenant(ctx context.Context, tenantID string) (int, er
 
 // enqueue registers PENDING deliveries for NSW-relevant outbox events that
 // have no delivery row yet. NSW-relevant means: booking created/paid, gate
-// decisions, port-call clearance decisions and queue call-ups.
+// decisions, port-call clearance decisions, queue call-ups and cleared
+// customs declarations.
 func (runner *Runner) enqueue(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims) error {
 	rows, err := tx.Query(ctx, `
 		SELECT o.event_id, o.event_type, o.payload::text, o.created_at FROM platform_outbox o
 		WHERE o.tenant_id = $1
 			AND ((o.topic = 'ports.booking.v1' AND o.event_type IN ('booking.drafted', 'booking.paid'))
 				OR (o.topic = 'ports.gate.v1' AND o.event_type IN ('gate.scan_approved', 'gate.scan_denied'))
-				OR (o.topic = 'ports.queue.v1' AND o.event_type = 'queue.called_up'))
+				OR (o.topic = 'ports.queue.v1' AND o.event_type = 'queue.called_up')
+				OR (o.topic = 'trade.declarations.v1' AND o.event_type = 'trade.declaration.cleared.v1'))
 			AND NOT EXISTS (SELECT 1 FROM nsw_delivery d WHERE d.source = 'platform_outbox' AND d.event_id = o.event_id)
 		ORDER BY o.created_at
 		LIMIT $2`, claims.TenantID, runner.config.BatchSize)
 	if err != nil {
 		return fmt.Errorf("scan platform outbox for NSW events: %w", err)
 	}
-	defer rows.Close()
+	// Buffer the batch before writing: pgx holds the connection until the
+	// rows are closed, so deliveries are inserted only after the scan.
+	type pendingDelivery struct {
+		eventID, eventType, reference, payload string
+		createdAt                              time.Time
+	}
+	var pending []pendingDelivery
 	for rows.Next() {
-		var eventID, eventType, payload string
-		var createdAt time.Time
-		if err := rows.Scan(&eventID, &eventType, &payload, &createdAt); err != nil {
+		var delivery pendingDelivery
+		if err := rows.Scan(&delivery.eventID, &delivery.eventType, &delivery.payload, &delivery.createdAt); err != nil {
+			rows.Close()
 			return fmt.Errorf("scan platform outbox event: %w", err)
 		}
-		reference := envelopeSubjectID(payload)
-		if reference == "" {
-			reference = eventID
-		}
-		if err := runner.insertDelivery(ctx, tx, claims, "platform_outbox", eventID, eventType, reference, payload, createdAt); err != nil {
-			return err
-		}
+		pending = append(pending, delivery)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return err
+	}
+	rows.Close()
+	for _, delivery := range pending {
+		reference := envelopeSubjectID(delivery.payload)
+		if reference == "" {
+			reference = delivery.eventID
+		}
+		if err := runner.insertDelivery(ctx, tx, claims, "platform_outbox", delivery.eventID, delivery.eventType, reference, delivery.payload, delivery.createdAt); err != nil {
+			return err
+		}
 	}
 
 	portCallRows, err := tx.Query(ctx, `
@@ -154,18 +167,26 @@ func (runner *Runner) enqueue(ctx context.Context, tx pgx.Tx, claims tenantctx.C
 	if err != nil {
 		return fmt.Errorf("scan port-call outbox for NSW events: %w", err)
 	}
-	defer portCallRows.Close()
+	var pendingPortCalls []pendingDelivery
 	for portCallRows.Next() {
-		var eventID, callID, payload string
-		var createdAt time.Time
-		if err := portCallRows.Scan(&eventID, &callID, &payload, &createdAt); err != nil {
+		var delivery pendingDelivery
+		if err := portCallRows.Scan(&delivery.eventID, &delivery.reference, &delivery.payload, &delivery.createdAt); err != nil {
+			portCallRows.Close()
 			return fmt.Errorf("scan port-call outbox event: %w", err)
 		}
-		if err := runner.insertDelivery(ctx, tx, claims, "port_call_outbox", eventID, "port_call.clearance_decided", callID, payload, createdAt); err != nil {
+		pendingPortCalls = append(pendingPortCalls, delivery)
+	}
+	if err := portCallRows.Err(); err != nil {
+		portCallRows.Close()
+		return err
+	}
+	portCallRows.Close()
+	for _, delivery := range pendingPortCalls {
+		if err := runner.insertDelivery(ctx, tx, claims, "port_call_outbox", delivery.eventID, "port_call.clearance_decided", delivery.reference, delivery.payload, delivery.createdAt); err != nil {
 			return err
 		}
 	}
-	return portCallRows.Err()
+	return nil
 }
 
 // insertDelivery serializes the handoff body per the negotiated content type

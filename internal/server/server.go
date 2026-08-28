@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/declarations"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
@@ -20,16 +21,23 @@ import (
 // Config wires every security and integration dependency. New fails closed
 // when any of them is missing.
 type Config struct {
-	Store         *portcall.Store
-	Bookings      *booking.Store
-	Queues        *queue.Store
-	Payments      payments.Gateway
-	Orchestrator  booking.Orchestrator
-	CallUps       queue.CallUpOrchestrator
-	AuthMode      string
-	TenantGateway tenantctx.Verifier
-	NSWVerifier   *nswsecurity.Verifier
-	Pool          *pgxpool.Pool
+	Store        *portcall.Store
+	Bookings     *booking.Store
+	Queues       *queue.Store
+	Declarations *declarations.Store
+	// DeclarationScorer is the fail-closed risk-scoring boundary; declaration
+	// submission cannot proceed without it.
+	DeclarationScorer declarations.Scorer
+	// DeclarationHighValueMinor is the high-value shipment threshold (invoice
+	// currency minor units) for the risk-lane rules; 0 disables it.
+	DeclarationHighValueMinor int64
+	Payments                  payments.Gateway
+	Orchestrator              booking.Orchestrator
+	CallUps                   queue.CallUpOrchestrator
+	AuthMode                  string
+	TenantGateway             tenantctx.Verifier
+	NSWVerifier               *nswsecurity.Verifier
+	Pool                      *pgxpool.Pool
 	// FGNShareBasisPoints is the FGN levy split out of each booking amount.
 	FGNShareBasisPoints int64
 	// NSWReplayTTL bounds how long ingress replay hashes are retained.
@@ -37,21 +45,27 @@ type Config struct {
 }
 
 type Server struct {
-	store        *portcall.Store
-	bookings     *booking.Store
-	queues       *queue.Store
-	payments     payments.Gateway
-	orchestrator booking.Orchestrator
-	callUps      queue.CallUpOrchestrator
-	fgnShareBPS  int64
+	store                     *portcall.Store
+	bookings                  *booking.Store
+	queues                    *queue.Store
+	declarations              *declarations.Store
+	declarationScorer         declarations.Scorer
+	declarationHighValueMinor int64
+	payments                  payments.Gateway
+	orchestrator              booking.Orchestrator
+	callUps                   queue.CallUpOrchestrator
+	fgnShareBPS               int64
 }
 
 func New(config Config) (http.Handler, error) {
-	if config.Store == nil || config.Bookings == nil || config.Queues == nil || config.Pool == nil {
-		return nil, errors.New("server requires port-call, booking and queue stores")
+	if config.Store == nil || config.Bookings == nil || config.Queues == nil || config.Declarations == nil || config.Pool == nil {
+		return nil, errors.New("server requires port-call, booking, queue and declaration stores")
 	}
 	if config.Payments == nil || config.Orchestrator == nil || config.CallUps == nil {
 		return nil, errors.New("server requires a payments gateway and workflow orchestrators")
+	}
+	if config.DeclarationScorer == nil {
+		return nil, errors.New("server requires a fail-closed declaration risk scorer")
 	}
 	if !config.TenantGateway.Ready() {
 		return nil, errors.New("tenant gateway verifier is not configured (key >= 32 bytes, issuer, audience)")
@@ -63,13 +77,16 @@ func New(config Config) (http.Handler, error) {
 		return nil, errors.New("FGN_SHARE_BASIS_POINTS must be between 1 and 9999")
 	}
 	server := &Server{
-		store:        config.Store,
-		bookings:     config.Bookings,
-		queues:       config.Queues,
-		payments:     config.Payments,
-		orchestrator: config.Orchestrator,
-		callUps:      config.CallUps,
-		fgnShareBPS:  config.FGNShareBasisPoints,
+		store:                     config.Store,
+		bookings:                  config.Bookings,
+		queues:                    config.Queues,
+		declarations:              config.Declarations,
+		declarationScorer:         config.DeclarationScorer,
+		declarationHighValueMinor: config.DeclarationHighValueMinor,
+		payments:                  config.Payments,
+		orchestrator:              config.Orchestrator,
+		callUps:                   config.CallUps,
+		fgnShareBPS:               config.FGNShareBasisPoints,
 	}
 	api := http.NewServeMux()
 	api.HandleFunc("GET /v1/partner-capabilities", server.partnerCapabilities)
@@ -88,6 +105,10 @@ func New(config Config) (http.Handler, error) {
 	api.HandleFunc("GET /v1/queue-requests/", server.queueRead)
 	api.HandleFunc("POST /v1/queue-requests/", server.queueOperation)
 	api.HandleFunc("GET /v1/terminals/", server.terminalQueue)
+	api.HandleFunc("POST /v1/declarations", server.createDeclaration)
+	api.HandleFunc("GET /v1/declarations", server.listDeclarations)
+	api.HandleFunc("GET /v1/declarations/", server.declarationRead)
+	api.HandleFunc("POST /v1/declarations/", server.declarationOperation)
 
 	nswIngress, err := nswsecurity.NewIngress(nswsecurity.IngressConfig{
 		SignatureHeader: "X-NSW-Signature",

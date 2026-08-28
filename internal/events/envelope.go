@@ -24,13 +24,17 @@ const (
 	TopicBooking = "ports.booking.v1"
 	TopicGate    = "ports.gate.v1"
 	TopicQueue   = "ports.queue.v1"
+
+	TopicDeclarations = "trade.declarations.v1"
 )
 
 // Provenance binds an event to the acting principal and the integrity chain.
+// The signature key is the canonical `signature`, matching every other
+// platform producer.
 type Provenance struct {
 	PrincipalID      string `json:"principalId"`
 	PrincipalRole    string `json:"principalRole"`
-	SignatureSHA256  string `json:"signatureSha256"`
+	Signature        string `json:"signature"`
 	LedgerCommitHash string `json:"ledgerCommitHash,omitempty"`
 }
 
@@ -86,8 +90,8 @@ type fhirBundle struct {
 // entry. The provenance signature is the SHA-256 of the exact bundle bytes, so
 // any tampering with the message entry invalidates the envelope.
 func Message(eventType, topic, correlationID, subjectID string, payloadJSON json.RawMessage, extensions map[string]string, principal Provenance, occurredAt time.Time) (Envelope, error) {
-	if strings.TrimSpace(eventType) == "" || (topic != TopicBooking && topic != TopicGate && topic != TopicQueue) {
-		return Envelope{}, errors.New("event type and a ports.* v1 topic are required")
+	if strings.TrimSpace(eventType) == "" || (topic != TopicBooking && topic != TopicGate && topic != TopicQueue && topic != TopicDeclarations) {
+		return Envelope{}, errors.New("event type and a platform v1 topic are required")
 	}
 	if strings.TrimSpace(correlationID) == "" || strings.TrimSpace(subjectID) == "" {
 		return Envelope{}, errors.New("correlation id and subject id are required")
@@ -142,7 +146,7 @@ func Message(eventType, topic, correlationID, subjectID string, payloadJSON json
 		return Envelope{}, fmt.Errorf("encode FHIR message bundle: %w", err)
 	}
 	sum := sha256.Sum256(bundleJSON)
-	principal.SignatureSHA256 = "sha256:" + hex.EncodeToString(sum[:])
+	principal.Signature = "sha256:" + hex.EncodeToString(sum[:])
 	return Envelope{
 		EnvelopeVersion: EnvelopeVersion,
 		EventID:         uuid.NewString(),
@@ -159,5 +163,5 @@ func Message(eventType, topic, correlationID, subjectID string, payloadJSON json
 // VerifySignature recomputes the provenance signature over the bundle bytes.
 func (envelope Envelope) VerifySignature() bool {
 	sum := sha256.Sum256(envelope.FHIR)
-	return envelope.Provenance.SignatureSHA256 == "sha256:"+hex.EncodeToString(sum[:])
+	return envelope.Provenance.Signature == "sha256:"+hex.EncodeToString(sum[:])
 }

@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/declarations"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
@@ -84,6 +85,24 @@ func run() error {
 	if err != nil || graceMinutes < 1 {
 		return errors.New("CALLUP_GRACE_MINUTES must be a positive integer")
 	}
+	// Declaration risk scoring is mandatory wiring: without the fail-closed
+	// scorer every submission would park in SCORING_UNAVAILABLE.
+	scorerTimeout, err := time.ParseDuration(defaultEnv("DECLARATIONS_SCORER_TIMEOUT", "10s"))
+	if err != nil || scorerTimeout <= 0 {
+		return errors.New("DECLARATIONS_SCORER_TIMEOUT must be a positive duration")
+	}
+	declarationScorer, err := declarations.NewHTTPScorer(declarations.ScorerConfig{
+		BaseURL:     requiredEnv("DECLARATIONS_SCORER_URL"),
+		BearerToken: os.Getenv("DECLARATIONS_SCORER_BEARER_TOKEN"),
+		Timeout:     scorerTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("configure declaration risk scorer: %w", err)
+	}
+	highValueMinor, err := strconv.ParseInt(defaultEnv("DECLARATIONS_HIGH_VALUE_MINOR", "0"), 10, 64)
+	if err != nil || highValueMinor < 0 {
+		return errors.New("DECLARATIONS_HIGH_VALUE_MINOR must be a non-negative integer")
+	}
 
 	paths := strings.Split(migrationPaths, ",")
 	migrations := make([][]byte, 0, len(paths))
@@ -123,18 +142,21 @@ func run() error {
 	// terminal queue in the same transaction.
 	bookingStore.SetCapacityListener(queueStore)
 	handler, err := server.New(server.Config{
-		Store:               portcall.NewStore(pool),
-		Bookings:            bookingStore,
-		Queues:              queueStore,
-		Payments:            paymentsGateway,
-		Orchestrator:        orchestrator,
-		CallUps:             callUps,
-		AuthMode:            authMode,
-		TenantGateway:       tenantGateway,
-		NSWVerifier:         nswVerifier,
-		Pool:                pool,
-		FGNShareBasisPoints: fgnShareBPS,
-		NSWReplayTTL:        time.Duration(replayTTLMinutes) * time.Minute,
+		Store:                     portcall.NewStore(pool),
+		Bookings:                  bookingStore,
+		Queues:                    queueStore,
+		Declarations:              declarations.NewStore(pool),
+		DeclarationScorer:         declarationScorer,
+		DeclarationHighValueMinor: highValueMinor,
+		Payments:                  paymentsGateway,
+		Orchestrator:              orchestrator,
+		CallUps:                   callUps,
+		AuthMode:                  authMode,
+		TenantGateway:             tenantGateway,
+		NSWVerifier:               nswVerifier,
+		Pool:                      pool,
+		FGNShareBasisPoints:       fgnShareBPS,
+		NSWReplayTTL:              time.Duration(replayTTLMinutes) * time.Minute,
 	})
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)

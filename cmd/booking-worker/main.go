@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/customs"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/declarations"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/ledger"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
 	"go.temporal.io/sdk/client"
@@ -84,14 +85,7 @@ func run() error {
 	if err != nil || customsTimeout <= 0 {
 		return errors.New("CUSTOMS_TIMEOUT must be a positive duration")
 	}
-	customsValidator, err := customs.NewHTTPValidator(customs.HTTPConfig{
-		BaseURL:        requiredEnv("CUSTOMS_BASE_URL"),
-		BearerToken:    os.Getenv("CUSTOMS_BEARER_TOKEN"),
-		ClientCertFile: os.Getenv("CUSTOMS_CLIENT_CERT_FILE"),
-		ClientKeyFile:  os.Getenv("CUSTOMS_CLIENT_KEY_FILE"),
-		CACertFile:     os.Getenv("CUSTOMS_CA_CERT_FILE"),
-		Timeout:        customsTimeout,
-	})
+	customsValidator, err := buildCustomsValidator(pool, customsTimeout)
 	if err != nil {
 		return fmt.Errorf("configure customs validator: %w", err)
 	}
@@ -160,6 +154,28 @@ func sweepCallUps(ctx context.Context, sweeper *queue.Sweeper, interval time.Dur
 		case <-ticker.C:
 			sweep()
 		}
+	}
+}
+
+// buildCustomsValidator selects the customs cross-validation backend.
+// CUSTOMS_VALIDATOR_BACKEND is "http" (default, backwards compatible) or
+// "local" (the platform declaration engine); any other value fails closed at
+// startup.
+func buildCustomsValidator(pool *pgxpool.Pool, timeout time.Duration) (customs.Validator, error) {
+	switch backend := defaultEnv("CUSTOMS_VALIDATOR_BACKEND", "http"); backend {
+	case "http":
+		return customs.NewHTTPValidator(customs.HTTPConfig{
+			BaseURL:        requiredEnv("CUSTOMS_BASE_URL"),
+			BearerToken:    os.Getenv("CUSTOMS_BEARER_TOKEN"),
+			ClientCertFile: os.Getenv("CUSTOMS_CLIENT_CERT_FILE"),
+			ClientKeyFile:  os.Getenv("CUSTOMS_CLIENT_KEY_FILE"),
+			CACertFile:     os.Getenv("CUSTOMS_CA_CERT_FILE"),
+			Timeout:        timeout,
+		})
+	case "local":
+		return customs.NewLocalValidator(declarations.NewStore(pool))
+	default:
+		return nil, fmt.Errorf("CUSTOMS_VALIDATOR_BACKEND must be \"http\" or \"local\", got %q", backend)
 	}
 }
 

@@ -105,6 +105,9 @@ func bookingEnvelope(t *testing.T, eventType, requestID, bookingID string) []byt
 	return envelopeJSON
 }
 
+// profileDigest is a fixed sha256 hex for the seeded agency profile version.
+const profileDigest = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+
 // seedNSWEvents inserts one NSW-relevant booking event and one port-call
 // clearance decision into the outboxes.
 func (env drainEnv) seedNSWEvents(t *testing.T) (bookingEventID, clearanceEventID string) {
@@ -119,8 +122,14 @@ func (env drainEnv) seedNSWEvents(t *testing.T) (bookingEventID, clearanceEventI
 			t.Fatalf("seed platform outbox: %v", err)
 		}
 		if _, err := tx.Exec(env.ctx, `
-			INSERT INTO port_calls (call_id, vessel_imo, port_code, declaration_reference, submitted_by, status, idempotency_key, created_at, updated_at, version, tenant_id)
-			VALUES ('CALL-TEST-0001','1234567','LAGOS','DECL-1','tester','DRAFT','idem-call-0001',$1,$1,1,$2)`,
+			INSERT INTO port_agency_profile_versions (profile_id, version, agency_code, active, profile_sha256, registered_by, registered_at, tenant_id)
+			VALUES ('PROFILE-TEST-1','v1','NCS',true,'sha256:`+profileDigest+`','nsw-adapter-test',$1,$2)`,
+			time.Now().UTC(), env.tenantID); err != nil {
+			t.Fatalf("seed agency profile: %v", err)
+		}
+		if _, err := tx.Exec(env.ctx, `
+			INSERT INTO port_calls (call_id, vessel_imo, port_code, declaration_reference, submitted_by, status, idempotency_key, agency_profile_id, agency_profile_version, created_at, updated_at, version, tenant_id)
+			VALUES ('CALL-TEST-0001','1234567','LAGOS','DECL-1','tester','DRAFT','idem-call-0001','PROFILE-TEST-1','v1',$1,$1,1,$2)`,
 			time.Now().UTC(), env.tenantID); err != nil {
 			t.Fatalf("seed port call: %v", err)
 		}
@@ -132,6 +141,76 @@ func (env drainEnv) seedNSWEvents(t *testing.T) (bookingEventID, clearanceEventI
 		}
 	})
 	return bookingEventID, clearanceEventID
+}
+
+// declarationEnvelope builds a trade.declarations.v1 envelope whose subject
+// id is the declaration ref, so the NSW handoff references the business
+// identifier.
+func declarationEnvelope(t *testing.T, eventType, declarationRef string) []byte {
+	t.Helper()
+	payload := json.RawMessage(`{"declaration_ref":"` + declarationRef + `","status":"CLEARED"}`)
+	envelope, err := events.Message(eventType, events.TopicDeclarations, "req-decl-00001", declarationRef, payload, nil,
+		events.Provenance{PrincipalID: "test", PrincipalRole: "risk-engine"}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("build declaration envelope: %v", err)
+	}
+	envelopeJSON, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal declaration envelope: %v", err)
+	}
+	return envelopeJSON
+}
+
+// TestDrainDeliversClearedDeclarations covers the declaration NSW bridge: a
+// trade.declaration.cleared.v1 outbox event is enqueued and delivered through
+// the same signed handoff, referenced by declaration ref.
+func TestDrainDeliversClearedDeclarations(t *testing.T) {
+	env := newDrainEnv(t)
+	eventID := uuid.NewString()
+	env.withTenant(t, func(tx pgx.Tx) {
+		if _, err := tx.Exec(env.ctx, `
+			INSERT INTO platform_outbox (event_id, tenant_id, topic, event_type, idempotency_key, payload, created_at)
+			VALUES ($1,$2,'trade.declarations.v1','trade.declaration.cleared.v1',$3,$4,$5)`,
+			eventID, env.tenantID, eventID, declarationEnvelope(t, "trade.declaration.cleared.v1", "NCS-2026-ABC123"), time.Now().UTC()); err != nil {
+			t.Fatalf("seed declaration outbox: %v", err)
+		}
+		// A non-cleared declaration event must NOT be bridged.
+		otherID := uuid.NewString()
+		if _, err := tx.Exec(env.ctx, `
+			INSERT INTO platform_outbox (event_id, tenant_id, topic, event_type, idempotency_key, payload, created_at)
+			VALUES ($1,$2,'trade.declarations.v1','trade.declaration.submitted.v1',$3,$4,$5)`,
+			otherID, env.tenantID, otherID, declarationEnvelope(t, "trade.declaration.submitted.v1", "NCS-2026-XYZ999"), time.Now().UTC()); err != nil {
+			t.Fatalf("seed non-cleared declaration outbox: %v", err)
+		}
+	})
+	fixture := newNSWFixture(t, http.StatusOK)
+	runner, err := NewRunner(env.pool, fixture.signer, fixture.client, env.runnerConfig(t, fixture, ContentTypeJSON, 3))
+	if err != nil {
+		t.Fatalf("build runner: %v", err)
+	}
+	delivered, err := runner.DrainOnce(context.Background())
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if delivered != 1 {
+		t.Fatalf("delivered = %d, want 1 (only the cleared declaration)", delivered)
+	}
+	request := <-fixture.capture
+	fixture.verifySignature(t, request)
+	var reference string
+	if err := env.pool.QueryRow(env.ctx, `SELECT call_reference FROM nsw_delivery WHERE event_id=$1`, eventID).Scan(&reference); err != nil {
+		t.Fatalf("query delivery reference: %v", err)
+	}
+	if reference != "NCS-2026-ABC123" {
+		t.Fatalf("call reference = %q, want the declaration ref", reference)
+	}
+	var bridged int
+	if err := env.pool.QueryRow(env.ctx, `SELECT count(*) FROM nsw_delivery`).Scan(&bridged); err != nil {
+		t.Fatalf("count deliveries: %v", err)
+	}
+	if bridged != 1 {
+		t.Fatalf("deliveries = %d, want 1 (submitted events are not bridged)", bridged)
+	}
 }
 
 func (env drainEnv) runnerConfig(t *testing.T, fixture nswFixture, contentType string, maxAttempts int) Config {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/declarations"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
@@ -54,15 +55,23 @@ func (fakeCallUps) CallUpObserverState(context.Context, string) (queue.CallUpObs
 	return queue.CallUpObserverState{}, nil
 }
 
+type fakeScorer struct{}
+
+func (fakeScorer) Score(context.Context, declarations.ScoreRequest) (declarations.ScoreResponse, error) {
+	return declarations.ScoreResponse{Score: 10, ModelVersion: "test-scorer-1"}, nil
+}
+
 func testConfig() Config {
 	return Config{
-		Store:        portcall.NewStore(nil),
-		Bookings:     booking.NewStore(nil),
-		Queues:       mustQueueStore(),
-		Payments:     fakePayments{},
-		Orchestrator: fakeOrchestrator{},
-		CallUps:      fakeCallUps{},
-		AuthMode:     AuthModeLoopbackTrustedProxy,
+		Store:             portcall.NewStore(nil),
+		Bookings:          booking.NewStore(nil),
+		Queues:            mustQueueStore(),
+		Declarations:      declarations.NewStore(nil),
+		DeclarationScorer: fakeScorer{},
+		Payments:          fakePayments{},
+		Orchestrator:      fakeOrchestrator{},
+		CallUps:           fakeCallUps{},
+		AuthMode:          AuthModeLoopbackTrustedProxy,
 		TenantGateway: tenantctx.Verifier{
 			Key:      []byte("0123456789abcdef0123456789abcdef"),
 			Issuer:   "gateway.blueeconomy.ng",
@@ -113,6 +122,16 @@ func TestNewFailsClosedWithoutDependencies(t *testing.T) {
 	config.NSWVerifier = nil
 	if _, err := New(config); err == nil {
 		t.Fatal("missing NSW verifier must fail closed")
+	}
+	config = testConfig()
+	config.Declarations = nil
+	if _, err := New(config); err == nil {
+		t.Fatal("missing declaration store must fail closed")
+	}
+	config = testConfig()
+	config.DeclarationScorer = nil
+	if _, err := New(config); err == nil {
+		t.Fatal("missing declaration scorer must fail closed")
 	}
 }
 

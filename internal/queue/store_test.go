@@ -412,7 +412,7 @@ func TestQueueEventsCarrySignedEnvelopes(t *testing.T) {
 		if envelope.Classification != events.ClassificationIntern {
 			t.Fatalf("envelope classification = %s, want INTERNAL", envelope.Classification)
 		}
-		if envelope.Provenance.SignatureSHA256 == "" {
+		if envelope.Provenance.Signature == "" {
 			t.Fatal("envelope provenance must carry the sha256 signature")
 		}
 		if envelope.Provenance.PrincipalID == "" || envelope.CorrelationID != request.IdempotencyKey {

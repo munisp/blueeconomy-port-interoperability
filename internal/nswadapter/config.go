@@ -1,6 +1,7 @@
 // Package nswadapter drains NSW-relevant platform outbox events (booking
 // created/paid, gate decisions, port-call clearance decisions, queue
-// call-ups) and delivers them to the NSW operator endpoint at-least-once as
+// call-ups, cleared customs declarations) and delivers them to the NSW
+// operator endpoint at-least-once as
 // RS256-signed messages over pinned-CA HTTPS. Delivery state is persisted per
 // event in the nsw_delivery ledger: PENDING -> DELIVERED, or
 // PENDING -> FAILED_PERMANENT after the configured attempt budget. Nothing is

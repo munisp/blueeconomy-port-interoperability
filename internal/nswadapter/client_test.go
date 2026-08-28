@@ -92,8 +92,9 @@ func newNSWFixture(t *testing.T, status int) nswFixture {
 }
 
 // verifySignature re-runs the RS256 verification and claim checks the NSW
-// operator side performs.
-func (fixture nswFixture) verifySignature(t *testing.T, request capturedRequest) {
+// operator side performs, and returns the decoded claims for caller-specific
+// assertions (tenant, jti).
+func (fixture nswFixture) verifySignature(t *testing.T, request capturedRequest) map[string]any {
 	t.Helper()
 	parts := strings.Split(request.signature, ".")
 	if len(parts) != 3 {
@@ -126,8 +127,7 @@ func (fixture nswFixture) verifySignature(t *testing.T, request capturedRequest)
 	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
 		t.Fatalf("decode claims: %v", err)
 	}
-	if claims["iss"] != "s1-port-interoperability" || claims["aud"] != "nsw.operator.ng" ||
-		claims["tenant_id"] != "tenant-apapa-port" || claims["jti"] != "delivery-0001" {
+	if claims["iss"] != "s1-port-interoperability" || claims["aud"] != "nsw.operator.ng" {
 		t.Fatalf("claims = %v", claims)
 	}
 	exp, ok := claims["exp"].(float64)
@@ -139,6 +139,7 @@ func (fixture nswFixture) verifySignature(t *testing.T, request capturedRequest)
 	if claims["payload_sha256"] != want {
 		t.Fatalf("payload_sha256 = %v, want %s (digest of the exact body)", claims["payload_sha256"], want)
 	}
+	return claims
 }
 
 func hexDigest(b []byte) string {
@@ -174,7 +175,10 @@ func TestClientDeliversSignedMessageOverPinnedHTTPS(t *testing.T) {
 	if request.contentType != ContentTypeJSON {
 		t.Fatalf("content type = %q", request.contentType)
 	}
-	fixture.verifySignature(t, request)
+	claims := fixture.verifySignature(t, request)
+	if claims["tenant_id"] != "tenant-apapa-port" || claims["jti"] != "delivery-0001" {
+		t.Fatalf("claims = %v", claims)
+	}
 }
 
 func TestClientTreatsReplayConflictAsDelivered(t *testing.T) {
