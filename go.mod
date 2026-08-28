@@ -6,6 +6,7 @@ toolchain go1.25.13
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/cyberphone/json-canonicalization v0.0.0-20241213102144-19d51d7fe467
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/redis/go-redis/v9 v9.22.0

@@ -1,18 +1,35 @@
 package events
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"testing"
 	"time"
 )
 
+// testSigner builds a throwaway signer for envelope unit tests.
+func testSigner(t *testing.T) *Signer {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate test key: %v", err)
+	}
+	signer, err := NewSigner(key, "1")
+	if err != nil {
+		t.Fatalf("build test signer: %v", err)
+	}
+	return signer
+}
+
 func TestMessageBuildsCompliantEnvelope(t *testing.T) {
+	signer := testSigner(t)
 	envelope, err := Message(
 		"booking.paid", TopicBooking, "req-0001", "booking-0001",
 		json.RawMessage(`{"booking_id":"booking-0001","status":"PAID"}`),
 		map[string]string{"terminal-id": "APAPA-T1"},
 		Provenance{PrincipalID: "trucker-1", PrincipalRole: "trucker", LedgerCommitHash: "sha256:abc"},
-		time.Now().UTC(),
+		time.Now().UTC(), signer,
 	)
 	if err != nil {
 		t.Fatalf("build envelope: %v", err)
@@ -42,7 +59,7 @@ func TestMessageBuildsCompliantEnvelope(t *testing.T) {
 	if bundle.Entry[0].Resource.ResourceType != "Basic" || bundle.Entry[0].Resource.ID != "booking-0001" {
 		t.Fatalf("bundle entry = %#v", bundle.Entry[0])
 	}
-	if !envelope.VerifySignature() {
+	if !envelope.VerifySignature(signer.PublicKey()) {
 		t.Fatal("envelope provenance signature must verify")
 	}
 	serialized, err := json.Marshal(envelope)
@@ -62,12 +79,13 @@ func TestMessageBuildsCompliantEnvelope(t *testing.T) {
 }
 
 func TestMessageBuildsQueueEnvelope(t *testing.T) {
+	signer := testSigner(t)
 	envelope, err := Message(
 		"queue.called_up", TopicQueue, "queue-req-0001", "queue-request-0001",
 		json.RawMessage(`{"queue_request_id":"queue-request-0001","status":"CALLED_UP"}`),
 		map[string]string{"terminal-id": "APAPA-T1", "priority-class": "PERISHABLE"},
 		Provenance{PrincipalID: "callup-engine", PrincipalRole: "callup-engine"},
-		time.Now().UTC(),
+		time.Now().UTC(), signer,
 	)
 	if err != nil {
 		t.Fatalf("build queue envelope: %v", err)
@@ -78,23 +96,24 @@ func TestMessageBuildsQueueEnvelope(t *testing.T) {
 	if envelope.Provenance.PrincipalID != "callup-engine" || envelope.Provenance.PrincipalRole != "callup-engine" {
 		t.Fatalf("queue envelope provenance = %#v", envelope.Provenance)
 	}
-	if !envelope.VerifySignature() {
+	if !envelope.VerifySignature(signer.PublicKey()) {
 		t.Fatal("queue envelope provenance signature must verify")
 	}
 }
 
 func TestMessageSignatureDetectsTampering(t *testing.T) {
+	signer := testSigner(t)
 	envelope, err := Message(
 		"gate.scan_approved", TopicGate, "req-0002", "scan-0001",
 		json.RawMessage(`{"decision":"APPROVED"}`), nil,
 		Provenance{PrincipalID: "gate-officer-1", PrincipalRole: "gate-officer"},
-		time.Now().UTC(),
+		time.Now().UTC(), signer,
 	)
 	if err != nil {
 		t.Fatalf("build envelope: %v", err)
 	}
 	envelope.FHIR = json.RawMessage(`{"resourceType":"Bundle","type":"message","entry":[]}`)
-	if envelope.VerifySignature() {
+	if envelope.VerifySignature(signer.PublicKey()) {
 		t.Fatal("tampered bundle must fail signature verification")
 	}
 }
@@ -118,7 +137,7 @@ func TestMessageFailsClosedOnMissingFields(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			if _, err := Message(testCase.eventType, testCase.topic, testCase.corrID, testCase.subjectID, testCase.payload, nil, testCase.principal, time.Now()); err == nil {
+			if _, err := Message(testCase.eventType, testCase.topic, testCase.corrID, testCase.subjectID, testCase.payload, nil, testCase.principal, time.Now(), testSigner(t)); err == nil {
 				t.Fatal("envelope with missing fields must fail closed")
 			}
 		})

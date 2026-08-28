@@ -107,9 +107,18 @@ func (ledger *TigerBeetleLedger) ensureAccounts() error {
 	if err != nil {
 		return fmt.Errorf("create settlement accounts: %w", err)
 	}
-	for _, result := range results {
-		if result.Status != tb.AccountExists {
-			return fmt.Errorf("create settlement account: unexpected status %v", result.Status)
+	// TigerBeetle 0.17.x dense results: one result per account, in input
+	// order. AccountCreated is the first-time success status; AccountExists is
+	// an idempotent retry whose stored fields match exactly. Any other status
+	// (AccountExistsWithDifferent*, validation failures) is a real error.
+	if len(results) != len(accounts) {
+		return fmt.Errorf("create settlement accounts: expected %d dense results, got %d", len(accounts), len(results))
+	}
+	for i, result := range results {
+		switch result.Status {
+		case tb.AccountCreated, tb.AccountExists:
+		default:
+			return fmt.Errorf("create settlement account %d: unexpected status %v", i, result.Status)
 		}
 	}
 	return nil
@@ -152,10 +161,19 @@ func (ledger *TigerBeetleLedger) CommitBookingSettlement(_ context.Context, sett
 	if err != nil {
 		return "", fmt.Errorf("commit settlement transfers: %w", err)
 	}
-	for _, result := range results {
-		// TransferExists means an idempotent retry of an already committed leg.
-		if result.Status != tb.TransferExists {
-			return "", fmt.Errorf("commit settlement transfer: unexpected status %v", result.Status)
+	// TigerBeetle 0.17.x dense results: one result per transfer, in input
+	// order. TransferCreated is the first-time success status; TransferExists
+	// is an idempotent retry whose stored fields match exactly. Any other
+	// status (TransferExistsWithDifferent*, validation failures) is a genuine
+	// conflict and must fail the commit.
+	if len(results) != len(transfers) {
+		return "", fmt.Errorf("commit settlement transfers: expected %d dense results, got %d", len(transfers), len(results))
+	}
+	for i, result := range results {
+		switch result.Status {
+		case tb.TransferCreated, tb.TransferExists:
+		default:
+			return "", fmt.Errorf("commit settlement transfer %d: unexpected status %v", i, result.Status)
 		}
 	}
 	return CommitHash(settlement.BookingID), nil

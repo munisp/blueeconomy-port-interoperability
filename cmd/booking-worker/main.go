@@ -20,6 +20,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/customs"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/declarations"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/ledger"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
 	"go.temporal.io/sdk/client"
@@ -69,7 +70,13 @@ func run() error {
 	}
 	defer pool.Close()
 
-	bookingStore := booking.NewStore(pool)
+	// Envelope provenance signing is mandatory: lifecycle events emitted by
+	// the workflow activities are JWS-signed (EdDSA over the JCS envelope).
+	envelopeSigner, err := events.SignerFromEnv()
+	if err != nil {
+		return fmt.Errorf("configure envelope signer: %w", err)
+	}
+	bookingStore := booking.NewStore(pool, envelopeSigner)
 	activities, err := booking.NewActivities(bookingStore, settlement)
 	if err != nil {
 		return err
@@ -85,14 +92,14 @@ func run() error {
 	if err != nil || customsTimeout <= 0 {
 		return errors.New("CUSTOMS_TIMEOUT must be a positive duration")
 	}
-	customsValidator, err := buildCustomsValidator(pool, customsTimeout)
+	customsValidator, err := buildCustomsValidator(pool, envelopeSigner, customsTimeout)
 	if err != nil {
 		return fmt.Errorf("configure customs validator: %w", err)
 	}
 	if err := activities.SetCustomsValidator(customsValidator, customsToleranceBPS); err != nil {
 		return fmt.Errorf("wire customs validator: %w", err)
 	}
-	queueStore, err := queue.NewStore(pool, bookingStore, time.Duration(graceMinutes)*time.Minute)
+	queueStore, err := queue.NewStore(pool, bookingStore, envelopeSigner, time.Duration(graceMinutes)*time.Minute)
 	if err != nil {
 		return fmt.Errorf("configure queue store: %w", err)
 	}
@@ -161,7 +168,7 @@ func sweepCallUps(ctx context.Context, sweeper *queue.Sweeper, interval time.Dur
 // CUSTOMS_VALIDATOR_BACKEND is "http" (default, backwards compatible) or
 // "local" (the platform declaration engine); any other value fails closed at
 // startup.
-func buildCustomsValidator(pool *pgxpool.Pool, timeout time.Duration) (customs.Validator, error) {
+func buildCustomsValidator(pool *pgxpool.Pool, signer *events.Signer, timeout time.Duration) (customs.Validator, error) {
 	switch backend := defaultEnv("CUSTOMS_VALIDATOR_BACKEND", "http"); backend {
 	case "http":
 		return customs.NewHTTPValidator(customs.HTTPConfig{
@@ -173,7 +180,7 @@ func buildCustomsValidator(pool *pgxpool.Pool, timeout time.Duration) (customs.V
 			Timeout:        timeout,
 		})
 	case "local":
-		return customs.NewLocalValidator(declarations.NewStore(pool))
+		return customs.NewLocalValidator(declarations.NewStore(pool, signer))
 	default:
 		return nil, fmt.Errorf("CUSTOMS_VALIDATOR_BACKEND must be \"http\" or \"local\", got %q", backend)
 	}

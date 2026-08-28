@@ -2,6 +2,8 @@ package queue
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,20 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
+
+// testSigner builds a throwaway envelope signer for store tests.
+func testSigner(t *testing.T) *events.Signer {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate test key: %v", err)
+	}
+	signer, err := events.NewSigner(key, "1")
+	if err != nil {
+		t.Fatalf("build test signer: %v", err)
+	}
+	return signer
+}
 
 // These tests run against a real PostgreSQL when QUEUE_TEST_DATABASE_URL (or
 // BOOKING_TEST_DATABASE_URL) is set — see scripts/verify-local.sh and
@@ -42,7 +58,7 @@ func newTestEnv(t *testing.T, graceWindow time.Duration) testEnv {
 		t.Skip("QUEUE_TEST_DATABASE_URL is not set; skipping PostgreSQL-backed queue tests")
 	}
 	ctx := context.Background()
-	bookingStore, err := booking.Open(ctx, databaseURL)
+	bookingStore, err := booking.Open(ctx, databaseURL, testSigner(t))
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
@@ -68,7 +84,7 @@ func newTestEnv(t *testing.T, graceWindow time.Duration) testEnv {
 	if _, err := bookingStore.Pool().Exec(ctx, `INSERT INTO platform_tenants (tenant_id, authority_reference) VALUES ($1, $2)`, tenantID, "queue-test-authority"); err != nil {
 		t.Fatalf("insert test tenant: %v", err)
 	}
-	store, err := NewStore(bookingStore.Pool(), bookingStore, graceWindow)
+	store, err := NewStore(bookingStore.Pool(), bookingStore, testSigner(t), graceWindow)
 	if err != nil {
 		t.Fatalf("build queue store: %v", err)
 	}

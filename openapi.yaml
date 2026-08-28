@@ -3,15 +3,16 @@ info:
   title: Blue Economy Port Interoperability API
   version: 0.1.0
   description: >-
-    Implemented local port-call workflow; IMO/NSW partner profiles remain
-    separate acceptance gates. The eCallUp booking, slot, gate-scan, call-up
-    queue and NSW ingress routes (/v1/bookings, /v1/slots, /v1/terminals,
-    /v1/queue-requests, /v1/terminals/{id}/queue, /v1/gate/scans,
-    /v1/nsw/port-calls) are wired and tenant-isolated but are documented in
-    README.md until the Ministry approves their external interface profile.
-    All /v1 routes require the loopback trusted-proxy headers plus a validated
-    HS256 gateway tenant token (Authorization: Bearer); the NSW ingress route
-    instead requires an RS256 authority JWS in X-NSW-Signature.
+    Implemented local port-call workflow plus the customs declaration engine
+    (/v1/declarations); IMO/NSW partner profiles remain separate acceptance
+    gates. The eCallUp booking, slot, gate-scan, call-up queue and NSW ingress
+    routes (/v1/bookings, /v1/slots, /v1/terminals, /v1/queue-requests,
+    /v1/terminals/{id}/queue, /v1/gate/scans, /v1/nsw/port-calls) are wired and
+    tenant-isolated but are documented in README.md until the Ministry
+    approves their external interface profile. All /v1 routes require the
+    loopback trusted-proxy headers plus a validated HS256 gateway tenant token
+    (Authorization: Bearer); the NSW ingress route instead requires an RS256
+    authority JWS in X-NSW-Signature.
 servers:
   - url: http://localhost:18080
 paths:
@@ -162,6 +163,147 @@ paths:
       parameters: [{$ref: '#/components/parameters/CallID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ClearanceAmendmentRequest'}}}}
       responses: {'200': {description: Amended clearance.}, '409': {description: Version/actor/decision conflict.}, '422': {description: Invalid amendment.}}
+  /v1/declarations:
+    post:
+      operationId: createDeclaration
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DeclarationCreateRequest'}
+      responses:
+        '201':
+          description: Draft declaration created (or exact idempotent replay of request_id).
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Declaration'}
+        '400': {description: Invalid declaration JSON or unknown field.}
+        '401': {description: Missing verified local edge identity.}
+        '409': {description: Conflicting reuse of request_id with divergent content.}
+        '422': {description: Declaration content failed validation.}
+    get:
+      operationId: listDeclarations
+      security: [loopbackTrustedProxy: []]
+      description: >-
+        Role-scoped list: the caller sees only its own declarations
+        (trader_id = verified subject); the optional trader_id filter may
+        only name the caller. Out-of-range limit/offset fall back to
+        limit=50, offset=0.
+      parameters:
+        - {$ref: '#/components/parameters/TrustedProxy'}
+        - {$ref: '#/components/parameters/AuthenticatedPrincipal'}
+        - name: trader_id
+          in: query
+          required: false
+          schema: {type: string}
+        - name: status
+          in: query
+          required: false
+          schema: {$ref: '#/components/schemas/DeclarationStatus'}
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 200, default: 50}
+        - name: offset
+          in: query
+          required: false
+          schema: {type: integer, minimum: 0, default: 0}
+      responses:
+        '200':
+          description: Declarations owned by the caller, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [declarations]
+                properties:
+                  declarations:
+                    type: array
+                    items: {$ref: '#/components/schemas/Declaration'}
+        '401': {description: Missing verified tenant claims.}
+        '403': {description: trader_id filter names another principal.}
+  /v1/declarations/{declaration_id}:
+    get:
+      operationId: getDeclaration
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/DeclarationID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '200':
+          description: Declaration.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Declaration'}
+        '401': {description: Missing verified local edge identity.}
+        '404': {description: Declaration not found.}
+  /v1/declarations/{declaration_id}/clearance-certificate:
+    get:
+      operationId: getClearanceCertificate
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/DeclarationID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '200':
+          description: Clearance certificate and its declaration.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [certificate, declaration]
+                properties:
+                  certificate: {$ref: '#/components/schemas/ClearanceCertificate'}
+                  declaration: {$ref: '#/components/schemas/Declaration'}
+        '401': {description: Missing verified local edge identity.}
+        '404': {description: Declaration not found.}
+        '409': {description: Declaration is not in a cleared state.}
+  /v1/declarations/{declaration_id}/submit:
+    post:
+      operationId: submitDeclaration
+      description: >-
+        DRAFT -> SUBMITTED followed by the fail-closed risk assessment. A
+        scorer outage parks the declaration in SCORING_UNAVAILABLE; the
+        response always reflects the persisted state.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/DeclarationID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TransitionRequest'}
+      responses:
+        '200':
+          description: Declaration after submission and risk assessment.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Declaration'}
+        '400': {description: expected_version must be a positive integer.}
+        '401': {description: Missing verified local edge identity.}
+        '404': {description: Declaration not found.}
+        '409': {description: Version or state conflict.}
+  /v1/declarations/{declaration_id}/amendments:
+    post:
+      operationId: amendDeclaration
+      description: >-
+        Supersedes the live (amendable) revision with a new DRAFT revision
+        carrying the amended content.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/DeclarationID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DeclarationAmendmentRequest'}
+      responses:
+        '201':
+          description: New DRAFT revision superseding the amended declaration.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Declaration'}
+        '400': {description: expected_version and the amendment content are required.}
+        '401': {description: Missing verified local edge identity.}
+        '404': {description: Declaration not found.}
+        '409': {description: Version conflict or the declaration is not amendable.}
+        '422': {description: Amended content failed validation.}
 components:
   securitySchemes:
     loopbackTrustedProxy:
@@ -190,6 +332,11 @@ components:
       in: path
       required: true
       schema: {type: string, minLength: 1, maxLength: 256}
+    DeclarationID:
+      name: declaration_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1}
   schemas:
     CreatePortCallRequest:
       type: object
@@ -267,3 +414,109 @@ components:
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}
         version: {type: integer, minimum: 1}
+    DeclarationStatus:
+      type: string
+      enum: [DRAFT, SUBMITTED, RISK_ASSESSED, GREEN_LANE, YELLOW_LANE, RED_LANE, CLEARED, REJECTED, SCORING_UNAVAILABLE, SUPERSEDED]
+    DeclarationType:
+      type: string
+      enum: [IMPORT, EXPORT, TRANSIT, RE_EXPORT, TEMPORARY_IMPORT]
+    RiskLane:
+      type: string
+      enum: [GREEN, YELLOW, RED]
+    DeclarationCreateRequest:
+      type: object
+      additionalProperties: false
+      description: >-
+        All money amounts are integer minor units of invoice_currency. Duty
+        rates are basis points (0-10000).
+      required: [request_id, declaration_ref, declaration_type, hs_code, goods_description, country_of_origin, port_of_entry, gross_weight_kg, net_weight_kg, number_of_packages, consignee_id, operator_id, invoice_amount_minor, invoice_currency, tariff_bps, vat_bps]
+      properties:
+        request_id: {type: string, minLength: 8, maxLength: 128, description: Idempotency key for the create.}
+        declaration_ref: {type: string, pattern: '^[A-Z0-9][A-Z0-9/-]{3,63}$'}
+        ucr: {type: string, minLength: 8, maxLength: 64}
+        declaration_type: {$ref: '#/components/schemas/DeclarationType'}
+        hs_code: {type: string, description: WCO HS code; normalized at ingestion.}
+        goods_description: {type: string, minLength: 10, maxLength: 4096}
+        country_of_origin: {type: string, pattern: '^[A-Z]{2}$'}
+        country_of_destination: {type: string, pattern: '^[A-Z]{2}$'}
+        port_of_entry: {type: string, minLength: 2, maxLength: 64}
+        gross_weight_kg: {type: integer, minimum: 1}
+        net_weight_kg: {type: integer, minimum: 1, description: Must not exceed gross_weight_kg.}
+        number_of_packages: {type: integer, minimum: 1}
+        consignee_id: {type: string, minLength: 2, maxLength: 128}
+        operator_id: {type: string, minLength: 2, maxLength: 128}
+        is_aeo: {type: boolean}
+        invoice_amount_minor: {type: integer, minimum: 1}
+        freight_amount_minor: {type: integer, minimum: 0}
+        insurance_amount_minor: {type: integer, minimum: 0}
+        invoice_currency: {type: string, pattern: '^[A-Z]{3}$'}
+        tariff_bps: {type: integer, minimum: 0, maximum: 10000}
+        vat_bps: {type: integer, minimum: 0, maximum: 10000}
+        levy_bps: {type: integer, minimum: 0, maximum: 10000}
+        excise_bps: {type: integer, minimum: 0, maximum: 10000}
+    DeclarationAmendmentRequest:
+      allOf:
+        - $ref: '#/components/schemas/DeclarationCreateRequest'
+        - type: object
+          additionalProperties: false
+          required: [expected_version]
+          properties:
+            expected_version: {type: integer, minimum: 1, description: Version of the live revision being amended.}
+    Declaration:
+      type: object
+      required: [declaration_id, tenant_id, request_id, declaration_ref, revision, trader_id, declaration_type, status, hs_code, goods_description, country_of_origin, port_of_entry, gross_weight_kg, net_weight_kg, number_of_packages, consignee_id, operator_id, is_aeo, invoice_amount_minor, freight_amount_minor, insurance_amount_minor, invoice_currency, tariff_bps, vat_bps, levy_bps, excise_bps, created_at, updated_at, version]
+      properties:
+        declaration_id: {type: string}
+        tenant_id: {type: string}
+        request_id: {type: string}
+        declaration_ref: {type: string}
+        ucr: {type: string}
+        revision: {type: integer, minimum: 1}
+        supersedes_id: {type: string}
+        trader_id: {type: string}
+        declaration_type: {$ref: '#/components/schemas/DeclarationType'}
+        status: {$ref: '#/components/schemas/DeclarationStatus'}
+        risk_lane: {$ref: '#/components/schemas/RiskLane'}
+        risk_score: {type: integer}
+        scoring_model: {type: string}
+        scoring_error: {type: string}
+        hs_code: {type: string}
+        goods_description: {type: string}
+        country_of_origin: {type: string}
+        country_of_destination: {type: string}
+        port_of_entry: {type: string}
+        gross_weight_kg: {type: integer}
+        net_weight_kg: {type: integer}
+        number_of_packages: {type: integer}
+        consignee_id: {type: string}
+        operator_id: {type: string}
+        is_aeo: {type: boolean}
+        invoice_amount_minor: {type: integer, description: Integer minor units.}
+        freight_amount_minor: {type: integer, description: Integer minor units.}
+        insurance_amount_minor: {type: integer, description: Integer minor units.}
+        invoice_currency: {type: string}
+        tariff_bps: {type: integer}
+        vat_bps: {type: integer}
+        levy_bps: {type: integer}
+        excise_bps: {type: integer}
+        duty_minor: {type: integer, description: Integer minor units.}
+        vat_minor: {type: integer, description: Integer minor units.}
+        levy_minor: {type: integer, description: Integer minor units.}
+        excise_minor: {type: integer, description: Integer minor units.}
+        total_duty_minor: {type: integer, description: Integer minor units.}
+        rejection_reason: {type: string}
+        submitted_at: {type: string, format: date-time}
+        cleared_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        version: {type: integer, minimum: 1}
+    ClearanceCertificate:
+      type: object
+      required: [certificate_id, declaration_id, certificate_number, issued_by, payload_sha256, issued_at]
+      properties:
+        certificate_id: {type: string}
+        declaration_id: {type: string}
+        certificate_number: {type: string}
+        issued_by: {type: string}
+        payload_sha256: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        issued_at: {type: string, format: date-time}

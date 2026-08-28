@@ -75,8 +75,9 @@ var (
 )
 
 // transitions is the complete fail-closed declaration state machine. Any pair
-// not listed here is prohibited. SCORING_UNAVAILABLE and REJECTED only escape
-// through SUPERSEDED (an amendment writes a fresh DRAFT revision).
+// not listed here is prohibited. Every non-terminal state escapes through
+// SUPERSEDED (an amendment writes a fresh DRAFT revision that must be
+// re-submitted and re-scored); CLEARED and SUPERSEDED are terminal.
 var transitions = map[Status]map[Status]bool{
 	StatusDraft: {
 		StatusSubmitted:  true,
@@ -92,18 +93,22 @@ var transitions = map[Status]map[Status]bool{
 		StatusGreenLane:  true,
 		StatusYellowLane: true,
 		StatusRedLane:    true,
+		StatusSuperseded: true,
 	},
 	StatusGreenLane: {
-		StatusCleared:  true,
-		StatusRejected: true,
+		StatusCleared:    true,
+		StatusRejected:   true,
+		StatusSuperseded: true,
 	},
 	StatusYellowLane: {
-		StatusCleared:  true,
-		StatusRejected: true,
+		StatusCleared:    true,
+		StatusRejected:   true,
+		StatusSuperseded: true,
 	},
 	StatusRedLane: {
-		StatusCleared:  true,
-		StatusRejected: true,
+		StatusCleared:    true,
+		StatusRejected:   true,
+		StatusSuperseded: true,
 	},
 	StatusRejected: {
 		StatusSuperseded: true,
@@ -119,7 +124,9 @@ func ValidTransition(current, next Status) bool {
 }
 
 // Amendable reports whether the declaration may be amended into a new DRAFT
-// revision: anything that has not reached a lane terminal decision.
+// revision: anything that has not reached a terminal decision (CLEARED) or
+// already been superseded. Amending an assessed or laned declaration starts a
+// fresh DRAFT revision that must be re-submitted and re-scored.
 func Amendable(status Status) bool {
 	return ValidTransition(status, StatusSuperseded)
 }

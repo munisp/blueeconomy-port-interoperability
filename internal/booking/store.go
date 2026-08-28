@@ -33,11 +33,15 @@ type CapacityListener interface {
 
 type Store struct {
 	pool     *pgxpool.Pool
+	signer   *events.Signer
 	listener CapacityListener
 }
 
-func NewStore(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+// NewStore builds the booking store. The envelope signer is mandatory:
+// lifecycle events are JWS-signed at emission and an unsigned pipeline fails
+// closed at the emit site.
+func NewStore(pool *pgxpool.Pool, signer *events.Signer) *Store {
+	return &Store{pool: pool, signer: signer}
 }
 
 // SetCapacityListener wires the capacity-release hook. A nil listener
@@ -60,7 +64,7 @@ func (store *Store) capacityReleased(ctx context.Context, tx pgx.Tx, claims tena
 	return nil
 }
 
-func Open(ctx context.Context, databaseURL string) (*Store, error) {
+func Open(ctx context.Context, databaseURL string, signer *events.Signer) (*Store, error) {
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
@@ -69,7 +73,7 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
-	return NewStore(pool), nil
+	return NewStore(pool, signer), nil
 }
 
 func (store *Store) Close() {
@@ -110,7 +114,7 @@ func scanBooking(row pgx.Row) (Booking, error) {
 
 // emit writes a FHIR-enveloped event into the transactional platform outbox
 // inside the caller's transaction, guaranteeing atomicity with the mutation.
-func emit(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, topic, eventType, correlationID, subjectID string, payload any, extensions map[string]string, principal Principal, ledgerCommitHash string, occurredAt time.Time) error {
+func emit(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, topic, eventType, correlationID, subjectID string, payload any, extensions map[string]string, principal Principal, ledgerCommitHash string, occurredAt time.Time, signer *events.Signer) error {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("encode %s payload: %w", eventType, err)
@@ -119,7 +123,7 @@ func emit(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, topic, eventT
 		PrincipalID:      principal.ID,
 		PrincipalRole:    principal.Role,
 		LedgerCommitHash: ledgerCommitHash,
-	}, occurredAt)
+	}, occurredAt, signer)
 	if err != nil {
 		return fmt.Errorf("build %s envelope: %w", eventType, err)
 	}
@@ -351,7 +355,7 @@ func (store *Store) createTx(ctx context.Context, tx pgx.Tx, claims tenantctx.Cl
 	if err := emit(ctx, tx, claims, events.TopicBooking, eventType, booking.RequestID, booking.BookingID, booking, map[string]string{
 		"terminal-id": booking.TerminalID,
 		"channel":     string(booking.Channel),
-	}, principal, "", now); err != nil {
+	}, principal, "", now, store.signer); err != nil {
 		return Booking{}, err
 	}
 	return booking, nil
@@ -409,7 +413,7 @@ func (store *Store) transitionTx(ctx context.Context, tx pgx.Tx, claims tenantct
 	if err != nil {
 		return Booking{}, fmt.Errorf("transition booking to %s: %w", next, err)
 	}
-	if err := emit(ctx, tx, claims, events.TopicBooking, eventType, result.RequestID, result.BookingID, result, extensions, principal, ledgerCommitHash, result.UpdatedAt); err != nil {
+	if err := emit(ctx, tx, claims, events.TopicBooking, eventType, result.RequestID, result.BookingID, result, extensions, principal, ledgerCommitHash, result.UpdatedAt, store.signer); err != nil {
 		return Booking{}, err
 	}
 	return result, nil
@@ -769,7 +773,7 @@ func (store *Store) RecordGateScan(ctx context.Context, bookingID, gateID, scann
 			if err := emit(ctx, tx, claims, events.TopicGate, "gate.scan_denied", booking.RequestID, bookingID, scan, map[string]string{
 				"gate-id": gateID,
 				"reason":  reason,
-			}, principal, "", scan.ScannedAt); err != nil {
+			}, principal, "", scan.ScannedAt, store.signer); err != nil {
 				return err
 			}
 			updated = booking
@@ -819,7 +823,7 @@ func (store *Store) RecordGateScan(ctx context.Context, bookingID, gateID, scann
 		if err := emit(ctx, tx, claims, events.TopicGate, "gate.scan_approved", booking.RequestID, bookingID, scan, map[string]string{
 			"gate-id":    gateID,
 			"booking-id": bookingID,
-		}, principal, "", scan.ScannedAt); err != nil {
+		}, principal, "", scan.ScannedAt, store.signer); err != nil {
 			return err
 		}
 		updated = result

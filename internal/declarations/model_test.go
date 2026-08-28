@@ -70,14 +70,38 @@ func TestValidTransitionRejectsIllegalPairs(t *testing.T) {
 }
 
 func TestAmendableScopesSupersession(t *testing.T) {
-	for _, status := range []Status{StatusDraft, StatusSubmitted, StatusRejected, StatusScoringUnavailable} {
+	for _, status := range []Status{
+		StatusDraft, StatusSubmitted, StatusRiskAssessed, StatusGreenLane, StatusYellowLane,
+		StatusRedLane, StatusRejected, StatusScoringUnavailable,
+	} {
 		if !Amendable(status) {
 			t.Fatalf("%s must be amendable into a superseding revision", status)
 		}
 	}
-	for _, status := range []Status{StatusRiskAssessed, StatusGreenLane, StatusYellowLane, StatusRedLane, StatusCleared, StatusSuperseded} {
+	for _, status := range []Status{StatusCleared, StatusSuperseded} {
 		if Amendable(status) {
 			t.Fatalf("%s must not be amendable", status)
+		}
+	}
+}
+
+func TestLaneStatesAmendIntoFreshDraft(t *testing.T) {
+	// Amendment supersedes an assessed/laned declaration; the new revision is
+	// a DRAFT whose only forward path is re-submission and re-scoring.
+	for _, status := range []Status{StatusRiskAssessed, StatusGreenLane, StatusYellowLane, StatusRedLane} {
+		if !ValidTransition(status, StatusSuperseded) {
+			t.Fatalf("%s -> SUPERSEDED must be permitted for amendment", status)
+		}
+	}
+	for _, pair := range [][2]Status{
+		{StatusRiskAssessed, StatusSubmitted}, // assessed work is discarded, not resumed
+		{StatusGreenLane, StatusSubmitted},
+		{StatusYellowLane, StatusSubmitted},
+		{StatusRedLane, StatusSubmitted},
+		{StatusCleared, StatusSuperseded}, // cleared declarations stay immutable
+	} {
+		if ValidTransition(pair[0], pair[1]) {
+			t.Fatalf("%s -> %s must be prohibited", pair[0], pair[1])
 		}
 	}
 }

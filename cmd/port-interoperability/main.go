@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/declarations"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
@@ -40,12 +41,24 @@ func run() error {
 	if authMode != server.AuthModeLoopbackTrustedProxy {
 		return fmt.Errorf("AUTH_MODE must be %q until a verified Ministry OIDC edge is configured", server.AuthModeLoopbackTrustedProxy)
 	}
+	// Tenant token verification: RS256 Keycloak JWKS when TENANT_GATEWAY_JWKS_URL
+	// is set (production profile); otherwise the HS256 shared-key loopback
+	// profile. Both fail closed on missing configuration.
+	tenantIssuer := requiredEnv("TENANT_GATEWAY_ISS")
+	tenantAudience := requiredEnv("TENANT_GATEWAY_AUD")
 	tenantGateway := tenantctx.Verifier{
-		Key:      []byte(requiredEnv("TENANT_GATEWAY_KEY")),
-		Issuer:   requiredEnv("TENANT_GATEWAY_ISS"),
-		Audience: requiredEnv("TENANT_GATEWAY_AUD"),
+		Key:      []byte(os.Getenv("TENANT_GATEWAY_KEY")),
+		Issuer:   tenantIssuer,
+		Audience: tenantAudience,
 	}
-	if !tenantGateway.Ready() {
+	var tenantGatewayJWKS *tenantctx.JWKSVerifier
+	if jwksURL := os.Getenv("TENANT_GATEWAY_JWKS_URL"); jwksURL != "" {
+		jwksVerifier, jwksErr := tenantctx.NewJWKSVerifier(jwksURL, tenantIssuer, tenantAudience, os.Getenv("TENANT_GATEWAY_JWKS_CA_FILE"))
+		if jwksErr != nil {
+			return fmt.Errorf("configure tenant gateway JWKS verifier: %w", jwksErr)
+		}
+		tenantGatewayJWKS = jwksVerifier
+	} else if !tenantGateway.Ready() {
 		return errors.New("TENANT_GATEWAY_KEY must be at least 32 bytes and issuer/audience must be set")
 	}
 	nswVerifier, err := nswsecurity.New(nswsecurity.Policy{
@@ -133,8 +146,14 @@ func run() error {
 			return fmt.Errorf("apply migration %d: %w", index+1, err)
 		}
 	}
-	bookingStore := booking.NewStore(pool)
-	queueStore, err := queue.NewStore(pool, bookingStore, time.Duration(graceMinutes)*time.Minute)
+	// Envelope provenance signing is mandatory: every lifecycle event emitted
+	// by the stores is a JWS (EdDSA over the JCS-canonical envelope).
+	envelopeSigner, err := events.SignerFromEnv()
+	if err != nil {
+		return fmt.Errorf("configure envelope signer: %w", err)
+	}
+	bookingStore := booking.NewStore(pool, envelopeSigner)
+	queueStore, err := queue.NewStore(pool, bookingStore, envelopeSigner, time.Duration(graceMinutes)*time.Minute)
 	if err != nil {
 		return fmt.Errorf("configure queue store: %w", err)
 	}
@@ -145,7 +164,7 @@ func run() error {
 		Store:                     portcall.NewStore(pool),
 		Bookings:                  bookingStore,
 		Queues:                    queueStore,
-		Declarations:              declarations.NewStore(pool),
+		Declarations:              declarations.NewStore(pool, envelopeSigner),
 		DeclarationScorer:         declarationScorer,
 		DeclarationHighValueMinor: highValueMinor,
 		Payments:                  paymentsGateway,
@@ -153,6 +172,7 @@ func run() error {
 		CallUps:                   callUps,
 		AuthMode:                  authMode,
 		TenantGateway:             tenantGateway,
+		TenantGatewayJWKS:         tenantGatewayJWKS,
 		NSWVerifier:               nswVerifier,
 		Pool:                      pool,
 		FGNShareBasisPoints:       fgnShareBPS,

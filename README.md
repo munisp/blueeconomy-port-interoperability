@@ -33,10 +33,25 @@ provide approved interface profiles and non-production endpoints.
                                                      │
  platform_outbox ──► cmd/outbox-publisher ──► Kafka ports.booking.v1 / ports.gate.v1 / ports.queue.v1
         (transactional, at-least-once, event-id key, all-ISR acks,
-         FHIR-aligned envelope v1.0 with provenance + sha256 signature)
+         FHIR-aligned envelope v1.0 with provenance + EdDSA JWS signature)
 ```
 
 ## Implemented controls
+
+Envelope provenance signing (fleet scheme): every lifecycle envelope carries a
+JWS compact serialization (EdDSA/Ed25519) over the JCS-canonicalized (RFC
+8785) JSON of the full envelope excluding the signature field, with protected
+header `{"alg":"EdDSA","kid":"port-interoperability-<epoch>"}`. The key comes
+from `ENVELOPE_SIGNING_PRIVATE_KEY` / `ENVELOPE_SIGNING_KEY_EPOCH`; any
+producer without a valid key refuses to start, and verification
+(`events.Verify` / `Envelope.VerifySignature`) enforces the algorithm, the
+producer kid prefix, an exact canonical-payload match and the Ed25519
+signature.
+
+The TigerBeetle settlement ledger accepts the 0.17.x dense-result statuses:
+`Created` on first commit and `Exists` on an idempotent retry with matching
+stored fields; every other status (including `ExistsWithDifferent*`) fails
+the commit.
 
 Port calls (existing, now tenant-wired):
 
@@ -44,9 +59,13 @@ Port calls (existing, now tenant-wired):
   exact replay and fail-closed conflicting-key rejection.
 - Version-checked `DRAFT -> SUBMITTED -> ACCEPTED|REJECTED` transitions,
   document declarations/review/supersession and clearance decisions/amendments.
-- **Tenant middleware is mounted on every `/v1/` route**: a validated HS256
-  gateway token (`TENANT_GATEWAY_*`) supplies the tenant claims; a
-  caller-supplied `X-Tenant-ID` header is rejected outright.
+- **Tenant middleware is mounted on every `/v1/` route**: a validated gateway
+  token (`TENANT_GATEWAY_*`) supplies the tenant claims; a caller-supplied
+  `X-Tenant-ID` header is rejected outright. Production sets
+  `TENANT_GATEWAY_JWKS_URL` to verify RS256 Keycloak tokens against an
+  HTTPS-only JWKS (eager startup fetch, RSA >= 2048-bit, redirects forbidden,
+  unknown-KID refresh bounded to 30s); the HS256 shared-key verifier remains
+  only for the local loopback profile.
 - **Every store operation runs inside `WithTenantTx`** (`tenantdb.WithTx`),
   setting transaction-local `app.tenant_id` so the migration-0008 row-level
   security policies isolate tenants; inserts stamp `tenant_id` from claims.
@@ -81,7 +100,7 @@ eCallUp 2.0 truck booking (new):
   progress via the `observer` query handler.
 - All booking and gate mutations write FHIR-aligned envelopes
   (`envelopeVersion` 1.0, FHIR R4 `Bundle` of type `message`, provenance with
-  principal id/role, SHA-256 bundle signature, ledger commit hash,
+  principal id/role, JWS provenance signature, ledger commit hash,
   classification `INTERNAL`) to the transactional `platform_outbox`;
   `cmd/outbox-publisher` drains it to Kafka at-least-once with all-ISR acks.
 - USSD fallback (`cmd/ussd-gateway`): Africa's Talking-style POST callback
@@ -127,7 +146,7 @@ eCallUp 2.0 truck call-up queue (new):
   with the call-up state.
 - All queue mutations write FHIR-aligned envelopes to `ports.queue.v1` through
   the same transactional `platform_outbox` (classification `INTERNAL`,
-  provenance principal + SHA-256 bundle signature).
+  provenance principal + JWS provenance signature).
 
 Nigeria Customs cross-validation (new, migration 0011):
 
@@ -178,9 +197,9 @@ NSW outbound adapter (`cmd/nsw-adapter`, new):
 
 | Command | Purpose | Required env (fail-closed) |
 | --- | --- | --- |
-| `cmd/port-interoperability` | HTTP API (port calls, bookings, call-up queue, gate scans, NSW ingress) | `DATABASE_URL`, `MIGRATION_PATH`, `PORT`, `AUTH_MODE=loopback_trusted_proxy`, `TENANT_GATEWAY_KEY` (≥32 bytes) / `_ISS` / `_AUD`, `NSW_JWKS_URL` (HTTPS) / `NSW_JWKS_PIN_SHA256` / `NSW_ALLOWED_KIDS` / `NSW_ISSUER` / `NSW_AUDIENCE`, `MOJALOOP_BASE_URL` (HTTPS) / `MOJALOOP_BEARER_TOKEN`, `TEMPORAL_ADDRESS` / `_NAMESPACE` / `_TASK_QUEUE`, `FGN_SHARE_BASIS_POINTS` (optional `CALLUP_GRACE_MINUTES`, default 90) |
-| `cmd/ussd-gateway` | USSD callback handler | `REDIS_URL`, `DATABASE_URL`, `MIGRATION_PATH`, `PORT`, `USSD_TENANT_ID` (optional `USSD_SESSION_TTL_SECONDS`, default 300) |
-| `cmd/booking-worker` | Temporal worker for `ECallUpBookingWorkflow` and `ECallUpCallUpWorkflow`, plus the call-up sweeper | `TEMPORAL_ADDRESS` / `_NAMESPACE` / `_TASK_QUEUE`, `DATABASE_URL`, `TIGERBEETLE_CLUSTER_ID`, `TIGERBEETLE_ADDRESSES`, `WORKER_TENANT_ID`, `CUSTOMS_BASE_URL` (HTTPS) + exactly one of `CUSTOMS_BEARER_TOKEN` or `CUSTOMS_CLIENT_CERT_FILE` + `CUSTOMS_CLIENT_KEY_FILE` (optional `CUSTOMS_CA_CERT_FILE` pinned CA, `CUSTOMS_TIMEOUT` default 10s, `CUSTOMS_WEIGHT_TOLERANCE_BPS` default 500, `CALLUP_GRACE_MINUTES` default 90, `QUEUE_SWEEP_INTERVAL_SECONDS` default 60) |
+| `cmd/port-interoperability` | HTTP API (port calls, bookings, call-up queue, gate scans, NSW ingress) | `DATABASE_URL`, `MIGRATION_PATH`, `PORT`, `AUTH_MODE=loopback_trusted_proxy`, `TENANT_GATEWAY_KEY` (≥32 bytes) / `_ISS` / `_AUD`, `NSW_JWKS_URL` (HTTPS) / `NSW_JWKS_PIN_SHA256` / `NSW_ALLOWED_KIDS` / `NSW_ISSUER` / `NSW_AUDIENCE`, `MOJALOOP_BASE_URL` (HTTPS) / `MOJALOOP_BEARER_TOKEN`, `TEMPORAL_ADDRESS` / `_NAMESPACE` / `_TASK_QUEUE`, `FGN_SHARE_BASIS_POINTS`, `ENVELOPE_SIGNING_PRIVATE_KEY` (Ed25519, base64/hex seed or key) + `ENVELOPE_SIGNING_KEY_EPOCH` (optional `TENANT_GATEWAY_JWKS_URL` (HTTPS) + `TENANT_GATEWAY_JWKS_CA_FILE` for the RS256 Keycloak profile, `CALLUP_GRACE_MINUTES` default 90) |
+| `cmd/ussd-gateway` | USSD callback handler | `REDIS_URL`, `DATABASE_URL`, `MIGRATION_PATH`, `PORT`, `USSD_TENANT_ID`, `ENVELOPE_SIGNING_PRIVATE_KEY` + `ENVELOPE_SIGNING_KEY_EPOCH` (optional `USSD_SESSION_TTL_SECONDS`, default 300) |
+| `cmd/booking-worker` | Temporal worker for `ECallUpBookingWorkflow` and `ECallUpCallUpWorkflow`, plus the call-up sweeper | `TEMPORAL_ADDRESS` / `_NAMESPACE` / `_TASK_QUEUE`, `DATABASE_URL`, `TIGERBEETLE_CLUSTER_ID`, `TIGERBEETLE_ADDRESSES`, `WORKER_TENANT_ID`, `CUSTOMS_BASE_URL` (HTTPS) + exactly one of `CUSTOMS_BEARER_TOKEN` or `CUSTOMS_CLIENT_CERT_FILE` + `CUSTOMS_CLIENT_KEY_FILE` (optional `CUSTOMS_CA_CERT_FILE` pinned CA, `CUSTOMS_TIMEOUT` default 10s, `CUSTOMS_WEIGHT_TOLERANCE_BPS` default 500, `CALLUP_GRACE_MINUTES` default 90, `QUEUE_SWEEP_INTERVAL_SECONDS` default 60), `ENVELOPE_SIGNING_PRIVATE_KEY` + `ENVELOPE_SIGNING_KEY_EPOCH` |
 | `cmd/outbox-publisher` | Kafka publisher for `platform_outbox` | `DATABASE_URL`, `KAFKA_BROKERS` (optional `OUTBOX_BATCH_SIZE`, `OUTBOX_POLL_INTERVAL`) |
 | `cmd/nsw-adapter` | Signed NSW outbound delivery of NSW-relevant outbox events | `DATABASE_URL`, `NSW_ENDPOINT_URL` (HTTPS), `NSW_CA_CERT_FILE` (pinned CA), `NSW_SIGNING_KEY_FILE` (PEM RSA ≥2048), `NSW_SIGNING_KID`, `NSW_OUTBOUND_AUDIENCE` (optional `NSW_OUTBOUND_ISSUER` default `s1-port-interoperability`, `NSW_OUTBOUND_SUBJECT` default `nsw-adapter`, `NSW_TOKEN_TTL` default 5m, `NSW_CONTENT_TYPE` `application/json` default or `application/xml`, `NSW_TIMEOUT` default 10s, `NSW_MAX_ATTEMPTS` default 8, `NSW_BACKOFF_BASE` default 5s, `NSW_BACKOFF_MAX` default 10m, `NSW_BATCH_SIZE` default 100, `NSW_POLL_INTERVAL` default 5s, `NSW_MAX_BODY_BYTES` default 1 MiB) |
 

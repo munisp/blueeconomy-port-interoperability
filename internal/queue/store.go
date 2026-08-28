@@ -31,14 +31,19 @@ const pendingBookingValidity = 12 * time.Hour
 type Store struct {
 	pool        *pgxpool.Pool
 	bookings    *booking.Store
+	signer      *events.Signer
 	graceWindow time.Duration
 }
 
 // NewStore fails closed without a booking store (the pending-booking leg) or a
-// negative grace window; a zero grace window selects DefaultGraceWindow.
-func NewStore(pool *pgxpool.Pool, bookings *booking.Store, graceWindow time.Duration) (*Store, error) {
+// negative grace window; a zero grace window selects DefaultGraceWindow. The
+// envelope signer is mandatory: call-up events are JWS-signed at emission.
+func NewStore(pool *pgxpool.Pool, bookings *booking.Store, signer *events.Signer, graceWindow time.Duration) (*Store, error) {
 	if bookings == nil {
 		return nil, errors.New("queue store requires a booking store")
+	}
+	if signer == nil {
+		return nil, errors.New("queue store requires an envelope signer")
 	}
 	if graceWindow < 0 {
 		return nil, errors.New("call-up grace window must not be negative")
@@ -46,10 +51,10 @@ func NewStore(pool *pgxpool.Pool, bookings *booking.Store, graceWindow time.Dura
 	if graceWindow == 0 {
 		graceWindow = DefaultGraceWindow
 	}
-	return &Store{pool: pool, bookings: bookings, graceWindow: graceWindow}, nil
+	return &Store{pool: pool, bookings: bookings, signer: signer, graceWindow: graceWindow}, nil
 }
 
-func Open(ctx context.Context, databaseURL string, bookings *booking.Store, graceWindow time.Duration) (*Store, error) {
+func Open(ctx context.Context, databaseURL string, bookings *booking.Store, signer *events.Signer, graceWindow time.Duration) (*Store, error) {
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
@@ -58,7 +63,7 @@ func Open(ctx context.Context, databaseURL string, bookings *booking.Store, grac
 		pool.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
-	return NewStore(pool, bookings, graceWindow)
+	return NewStore(pool, bookings, signer, graceWindow)
 }
 
 func (store *Store) Close() {
@@ -98,7 +103,7 @@ func scanRequest(row pgx.Row) (Request, error) {
 
 // emit writes a FHIR-enveloped ports.queue.v1 event into the transactional
 // platform outbox inside the caller's transaction.
-func emit(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, eventType, correlationID, subjectID string, payload any, extensions map[string]string, principal Principal, occurredAt time.Time) error {
+func emit(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, eventType, correlationID, subjectID string, payload any, extensions map[string]string, principal Principal, occurredAt time.Time, signer *events.Signer) error {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("encode %s payload: %w", eventType, err)
@@ -106,7 +111,7 @@ func emit(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, eventType, co
 	envelope, err := events.Message(eventType, events.TopicQueue, correlationID, subjectID, payloadJSON, extensions, events.Provenance{
 		PrincipalID:   principal.ID,
 		PrincipalRole: principal.Role,
-	}, occurredAt)
+	}, occurredAt, signer)
 	if err != nil {
 		return fmt.Errorf("build %s envelope: %w", eventType, err)
 	}
@@ -217,7 +222,7 @@ func (store *Store) Create(ctx context.Context, request CreateRequest, channel b
 		if err := emit(ctx, tx, claims, "queue.requested", inserted.IdempotencyKey, inserted.QueueRequestID, inserted, map[string]string{
 			"terminal-id":    inserted.TerminalID,
 			"priority-class": string(inserted.PriorityClass),
-		}, principal, now); err != nil {
+		}, principal, now, store.signer); err != nil {
 			return err
 		}
 		// Position assignment runs under the terminal row lock taken above, so
@@ -294,7 +299,7 @@ func (store *Store) transitionTx(ctx context.Context, tx pgx.Tx, claims tenantct
 	if err != nil {
 		return Request{}, fmt.Errorf("transition queue request to %s: %w", next, err)
 	}
-	if err := emit(ctx, tx, claims, eventType, result.IdempotencyKey, result.QueueRequestID, result, extensions, principal, result.UpdatedAt); err != nil {
+	if err := emit(ctx, tx, claims, eventType, result.IdempotencyKey, result.QueueRequestID, result, extensions, principal, result.UpdatedAt, store.signer); err != nil {
 		return Request{}, err
 	}
 	return result, nil

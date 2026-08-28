@@ -2,6 +2,8 @@ package booking
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -11,8 +13,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
+
+// testSigner builds a throwaway envelope signer for store tests.
+func testSigner(t *testing.T) *events.Signer {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate test key: %v", err)
+	}
+	signer, err := events.NewSigner(key, "1")
+	if err != nil {
+		t.Fatalf("build test signer: %v", err)
+	}
+	return signer
+}
 
 // These tests run against a real PostgreSQL when BOOKING_TEST_DATABASE_URL is
 // set (see scripts/verify-local.sh and docker-compose.integration.yml). They
@@ -32,7 +49,7 @@ func newTestEnv(t *testing.T) testEnv {
 		t.Skip("BOOKING_TEST_DATABASE_URL is not set; skipping PostgreSQL-backed booking tests")
 	}
 	ctx := context.Background()
-	store, err := Open(ctx, databaseURL)
+	store, err := Open(ctx, databaseURL, testSigner(t))
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}

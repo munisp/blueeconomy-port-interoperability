@@ -2,6 +2,8 @@ package nswadapter
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"encoding/pem"
 	"encoding/xml"
@@ -108,11 +110,26 @@ func (env drainEnv) withTenantRead(t *testing.T, work func(pgx.Tx)) {
 	work(tx)
 }
 
+// testEnvelopeSigner builds a throwaway JWS signer for outbox fixture
+// envelopes; the NSW drain forwards the signed payload unchanged.
+func testEnvelopeSigner(t *testing.T) *events.Signer {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate test key: %v", err)
+	}
+	signer, err := events.NewSigner(key, "1")
+	if err != nil {
+		t.Fatalf("build test signer: %v", err)
+	}
+	return signer
+}
+
 func bookingEnvelope(t *testing.T, eventType, requestID, bookingID string) []byte {
 	t.Helper()
 	payload := json.RawMessage(`{"booking_id":"` + bookingID + `"}`)
 	envelope, err := events.Message(eventType, events.TopicBooking, requestID, bookingID, payload, nil,
-		events.Provenance{PrincipalID: "test", PrincipalRole: "test"}, time.Now().UTC())
+		events.Provenance{PrincipalID: "test", PrincipalRole: "test"}, time.Now().UTC(), testEnvelopeSigner(t))
 	if err != nil {
 		t.Fatalf("build envelope: %v", err)
 	}
@@ -168,7 +185,7 @@ func declarationEnvelope(t *testing.T, eventType, declarationRef string) []byte 
 	t.Helper()
 	payload := json.RawMessage(`{"declaration_ref":"` + declarationRef + `","status":"CLEARED"}`)
 	envelope, err := events.Message(eventType, events.TopicDeclarations, "req-decl-00001", declarationRef, payload, nil,
-		events.Provenance{PrincipalID: "test", PrincipalRole: "risk-engine"}, time.Now().UTC())
+		events.Provenance{PrincipalID: "test", PrincipalRole: "risk-engine"}, time.Now().UTC(), testEnvelopeSigner(t))
 	if err != nil {
 		t.Fatalf("build declaration envelope: %v", err)
 	}

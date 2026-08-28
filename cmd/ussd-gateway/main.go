@@ -19,6 +19,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/ussd"
@@ -82,12 +83,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	bookingStore := booking.NewStore(pool)
+	// Envelope provenance signing is mandatory: bookings and queue entries
+	// created over USSD emit JWS-signed lifecycle events.
+	envelopeSigner, err := events.SignerFromEnv()
+	if err != nil {
+		return fmt.Errorf("configure envelope signer: %w", err)
+	}
+	bookingStore := booking.NewStore(pool, envelopeSigner)
 	directory, err := booking.NewDirectory(bookingStore, booking.Principal{ID: "ussd-gateway", Role: "trucker"})
 	if err != nil {
 		return err
 	}
-	queueStore, err := queue.NewStore(pool, bookingStore, 0)
+	queueStore, err := queue.NewStore(pool, bookingStore, envelopeSigner, 0)
 	if err != nil {
 		return err
 	}

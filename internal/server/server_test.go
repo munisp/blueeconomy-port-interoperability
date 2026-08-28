@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/declarations"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
@@ -18,10 +21,23 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
 
+// mustSigner builds a throwaway envelope signer for constructor tests.
+func mustSigner() *events.Signer {
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	signer, err := events.NewSigner(key, "1")
+	if err != nil {
+		panic(err)
+	}
+	return signer
+}
+
 // mustQueueStore builds a queue store without a database for fail-closed
 // constructor tests; routes backed by it are exercised against PostgreSQL.
 func mustQueueStore() *queue.Store {
-	store, err := queue.NewStore(nil, booking.NewStore(nil), time.Minute)
+	store, err := queue.NewStore(nil, booking.NewStore(nil, mustSigner()), mustSigner(), time.Minute)
 	if err != nil {
 		panic(err)
 	}
@@ -64,9 +80,9 @@ func (fakeScorer) Score(context.Context, declarations.ScoreRequest) (declaration
 func testConfig() Config {
 	return Config{
 		Store:             portcall.NewStore(nil),
-		Bookings:          booking.NewStore(nil),
+		Bookings:          booking.NewStore(nil, mustSigner()),
 		Queues:            mustQueueStore(),
-		Declarations:      declarations.NewStore(nil),
+		Declarations:      declarations.NewStore(nil, mustSigner()),
 		DeclarationScorer: fakeScorer{},
 		Payments:          fakePayments{},
 		Orchestrator:      fakeOrchestrator{},

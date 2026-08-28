@@ -36,6 +36,9 @@ type Config struct {
 	CallUps                   queue.CallUpOrchestrator
 	AuthMode                  string
 	TenantGateway             tenantctx.Verifier
+	// TenantGatewayJWKS, when set, replaces the HS256 shared-key verifier with
+	// RS256 Keycloak JWKS verification (production profile).
+	TenantGatewayJWKS *tenantctx.JWKSVerifier
 	NSWVerifier               *nswsecurity.Verifier
 	Pool                      *pgxpool.Pool
 	// FGNShareBasisPoints is the FGN levy split out of each booking amount.
@@ -67,7 +70,7 @@ func New(config Config) (http.Handler, error) {
 	if config.DeclarationScorer == nil {
 		return nil, errors.New("server requires a fail-closed declaration risk scorer")
 	}
-	if !config.TenantGateway.Ready() {
+	if config.TenantGatewayJWKS == nil && !config.TenantGateway.Ready() {
 		return nil, errors.New("tenant gateway verifier is not configured (key >= 32 bytes, issuer, audience)")
 	}
 	if config.NSWVerifier == nil || config.Pool == nil || config.NSWReplayTTL <= 0 {
@@ -123,7 +126,11 @@ func New(config Config) (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", server.health)
 	// Tenant middleware (HS256 gateway token) protects all tenant API routes.
-	mux.Handle("/v1/", requireAuthentication(config.AuthMode, tenantctx.Middleware(config.TenantGateway, api)))
+	var tenantVerifier tenantctx.TokenVerifier = config.TenantGateway
+	if config.TenantGatewayJWKS != nil {
+		tenantVerifier = config.TenantGatewayJWKS
+	}
+	mux.Handle("/v1/", requireAuthentication(config.AuthMode, tenantctx.Middleware(tenantVerifier, api)))
 	// NSW ingress uses asymmetric JWS authority signatures instead of the
 	// gateway token; it is mounted last so the more specific pattern wins.
 	mux.Handle("POST /v1/nsw/port-calls", requireAuthentication(config.AuthMode, nswIngress))

@@ -39,7 +39,7 @@ func newSweeperEnv(t *testing.T) sweeperEnv {
 		t.Skip("QUEUE_TEST_DATABASE_URL is not set; skipping PostgreSQL-backed sweeper tests")
 	}
 	ctx := context.Background()
-	bookingStore, err := booking.Open(ctx, databaseURL)
+	bookingStore, err := booking.Open(ctx, databaseURL, testSigner(t))
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
@@ -62,7 +62,7 @@ func newSweeperEnv(t *testing.T) sweeperEnv {
 			t.Fatalf("apply migration %s: %v", entry, err)
 		}
 	}
-	store, err := NewStore(bookingStore.Pool(), bookingStore, DefaultGraceWindow)
+	store, err := NewStore(bookingStore.Pool(), bookingStore, testSigner(t), DefaultGraceWindow)
 	if err != nil {
 		t.Fatalf("build queue store: %v", err)
 	}

@@ -29,7 +29,14 @@ type Verifier struct {
 	Now      func() time.Time
 }
 
-func Middleware(verifier Verifier, next http.Handler) http.Handler {
+// TokenVerifier is the gateway token verification boundary: the HS256
+// shared-key Verifier (local loopback profile) or the RS256 Keycloak
+// JWKSVerifier (production profile).
+type TokenVerifier interface {
+	Verify(token string) (Claims, error)
+}
+
+func Middleware(verifier TokenVerifier, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if strings.TrimSpace(request.Header.Get("X-Tenant-ID")) != "" {
 			http.Error(response, "caller-supplied tenant header is prohibited", http.StatusBadRequest)

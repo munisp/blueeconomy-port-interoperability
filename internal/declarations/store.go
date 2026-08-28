@@ -21,14 +21,18 @@ import (
 // tenantdb.WithTx so the RLS policies isolate tenants; lifecycle events are
 // written to the platform outbox in the same transaction as the mutation.
 type Store struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	signer *events.Signer
 }
 
-func NewStore(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+// NewStore builds the declaration store. The envelope signer is mandatory:
+// lifecycle events (including trade.declaration.cleared.v1 for the NSW
+// bridge) are JWS-signed at emission.
+func NewStore(pool *pgxpool.Pool, signer *events.Signer) *Store {
+	return &Store{pool: pool, signer: signer}
 }
 
-func Open(ctx context.Context, databaseURL string) (*Store, error) {
+func Open(ctx context.Context, databaseURL string, signer *events.Signer) (*Store, error) {
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
@@ -37,7 +41,7 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
-	return NewStore(pool), nil
+	return NewStore(pool, signer), nil
 }
 
 func (store *Store) Close() {
@@ -82,7 +86,7 @@ func scanDeclaration(row pgx.Row) (Declaration, error) {
 // platform outbox inside the caller's transaction. The envelope subject id is
 // the declaration ref so downstream consumers (including the NSW adapter)
 // reference the business identifier.
-func emit(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, eventType string, declaration Declaration, extensions map[string]string, principal Principal, occurredAt time.Time) error {
+func emit(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, eventType string, declaration Declaration, extensions map[string]string, principal Principal, occurredAt time.Time, signer *events.Signer) error {
 	payloadJSON, err := json.Marshal(declaration)
 	if err != nil {
 		return fmt.Errorf("encode %s payload: %w", eventType, err)
@@ -91,7 +95,7 @@ func emit(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, eventType str
 		payloadJSON, extensions, events.Provenance{
 			PrincipalID:   principal.ID,
 			PrincipalRole: principal.Role,
-		}, occurredAt)
+		}, occurredAt, signer)
 	if err != nil {
 		return fmt.Errorf("build %s envelope: %w", eventType, err)
 	}
@@ -351,7 +355,7 @@ func (store *Store) Submit(ctx context.Context, declarationID string, expectedVe
 			"declaration-ref":  updated.DeclarationRef,
 			"declaration-type": string(updated.DeclarationType),
 			"total-duty-minor": fmt.Sprintf("%d", breakdown.TotalDutyMinor),
-		}, principal, now); err != nil {
+		}, principal, now, store.signer); err != nil {
 			return err
 		}
 		submitted = updated
@@ -437,7 +441,7 @@ func (store *Store) AssessRisk(ctx context.Context, declarationID string, expect
 			}
 			if err := emit(ctx, tx, claims, EventScoringUnavailable, unavailable, map[string]string{
 				"declaration-ref": unavailable.DeclarationRef,
-			}, principal, now); err != nil {
+			}, principal, now, store.signer); err != nil {
 				return err
 			}
 			assessed = unavailable
@@ -485,7 +489,7 @@ func (store *Store) AssessRisk(ctx context.Context, declarationID string, expect
 			"risk-lane":       string(lane),
 			"risk-score":      fmt.Sprintf("%d", assessment.AdjustedScore),
 			"lane-reasons":    string(reasonsJSON),
-		}, principal, now); err != nil {
+		}, principal, now, store.signer); err != nil {
 			return err
 		}
 		if finalStatus == StatusCleared {
@@ -495,7 +499,7 @@ func (store *Store) AssessRisk(ctx context.Context, declarationID string, expect
 			if err := emit(ctx, tx, claims, EventCleared, updated, map[string]string{
 				"declaration-ref": updated.DeclarationRef,
 				"risk-lane":       string(lane),
-			}, principal, now); err != nil {
+			}, principal, now, store.signer); err != nil {
 				return err
 			}
 		}
@@ -576,9 +580,12 @@ func (store *Store) ClearanceCertificate(ctx context.Context, declarationID stri
 }
 
 // Amend supersedes the live revision and writes a new DRAFT revision under
-// the same declaration ref. Only pre-terminal revisions are amendable
-// (DRAFT, SUBMITTED, REJECTED, SCORING_UNAVAILABLE); a lane-assessed or
-// cleared declaration is immutable. Idempotent on the amendment request_id.
+// the same declaration ref. Every non-terminal revision is amendable (DRAFT,
+// SUBMITTED, RISK_ASSESSED, the lanes, REJECTED, SCORING_UNAVAILABLE); only a
+// CLEARED or already SUPERSEDED declaration is immutable. Amending an
+// assessed or laned declaration forces re-scoring: the new revision is a
+// DRAFT that must be submitted and risk-assessed again. Idempotent on the
+// amendment request_id.
 func (store *Store) Amend(ctx context.Context, declarationID string, request CreateRequest, expectedVersion int64, principal Principal) (Declaration, error) {
 	if err := request.Validate(); err != nil {
 		return Declaration{}, err
@@ -646,7 +653,7 @@ func (store *Store) Amend(ctx context.Context, declarationID string, request Cre
 			"declaration-ref": created.DeclarationRef,
 			"revision":        fmt.Sprintf("%d", created.Revision),
 			"supersedes":      declarationID,
-		}, principal, now); err != nil {
+		}, principal, now, store.signer); err != nil {
 			return err
 		}
 		amended = created

@@ -2,6 +2,8 @@ package declarations
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,8 +13,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
+
+// testSigner builds a throwaway envelope signer for store tests.
+func testSigner(t *testing.T) *events.Signer {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate test key: %v", err)
+	}
+	signer, err := events.NewSigner(key, "1")
+	if err != nil {
+		t.Fatalf("build test signer: %v", err)
+	}
+	return signer
+}
 
 // These tests run against a real PostgreSQL when DECLARATIONS_TEST_DATABASE_URL
 // is set (see scripts/verify-local.sh and docker-compose.integration.yml).
@@ -32,7 +49,7 @@ func newTestEnv(t *testing.T) testEnv {
 		t.Skip("DECLARATIONS_TEST_DATABASE_URL is not set; skipping PostgreSQL-backed declaration tests")
 	}
 	ctx := context.Background()
-	store, err := Open(ctx, databaseURL)
+	store, err := Open(ctx, databaseURL, testSigner(t))
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
@@ -337,14 +354,35 @@ func TestDeclarationRejectsIllegalTransitions(t *testing.T) {
 	if _, _, err := env.store.ClearanceCertificate(env.ctx, created.DeclarationID); !errors.Is(err, ErrNotCleared) {
 		t.Fatalf("certificate on yellow lane = %v, want ErrNotCleared", err)
 	}
-	// Lane-assessed declarations are immutable.
-	if _, err := env.store.Amend(env.ctx, created.DeclarationID, createRequest("req-decl-0003-amend"), assessed.Version, principal()); !errors.Is(err, ErrInvalidTransition) {
-		t.Fatalf("amend yellow lane = %v, want ErrInvalidTransition", err)
+	// Lane-assessed declarations are amendable: the amendment supersedes the
+	// laned revision and writes a fresh DRAFT that must be re-scored.
+	amended, err := env.store.Amend(env.ctx, created.DeclarationID, createRequest("req-decl-0003-amend"), assessed.Version, principal())
+	if err != nil {
+		t.Fatalf("amend yellow lane: %v", err)
 	}
-	// List is scoped to the trader.
+	if amended.Status != StatusDraft || amended.Revision != 2 || amended.SupersedesID == nil || *amended.SupersedesID != created.DeclarationID {
+		t.Fatalf("lane amendment must open a superseding DRAFT revision, got %+v", amended)
+	}
+	head, err := env.store.HeadByRef(env.ctx, amended.DeclarationRef)
+	if err != nil || head.DeclarationID != amended.DeclarationID {
+		t.Fatalf("amendment revision must head the ref, got %+v, %v", head, err)
+	}
+	superseded, err := env.store.Get(env.ctx, created.DeclarationID)
+	if err != nil || superseded.Status != StatusSuperseded {
+		t.Fatalf("laned revision must be SUPERSEDED, got %+v, %v", superseded, err)
+	}
+	// The cleared terminal remains immutable.
+	if _, err := env.store.Amend(env.ctx, created.DeclarationID, createRequest("req-decl-0003-amend-2"), superseded.Version, principal()); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("amend superseded = %v, want ErrInvalidTransition", err)
+	}
+	// List is scoped to the trader and returns both revisions.
 	list, err := env.store.List(env.ctx, "declarations-test-trader", "", 50, 0)
-	if err != nil || len(list) != 1 {
+	if err != nil || len(list) != 2 {
 		t.Fatalf("list = %+v, %v", list, err)
+	}
+	drafts, err := env.store.List(env.ctx, "declarations-test-trader", StatusDraft, 50, 0)
+	if err != nil || len(drafts) != 1 || drafts[0].DeclarationID != amended.DeclarationID {
+		t.Fatalf("status-filtered list = %+v, %v", drafts, err)
 	}
 	other, err := env.store.List(env.ctx, "another-trader", "", 50, 0)
 	if err != nil || len(other) != 0 {

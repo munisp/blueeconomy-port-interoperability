@@ -5,8 +5,7 @@
 package events
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -87,9 +86,13 @@ type fhirBundle struct {
 // Message builds a signed envelope for a domain event. subjectID identifies the
 // aggregate (booking or gate scan), payloadJSON is the domain payload, and
 // extensions carry flat scalar context (slot, terminal, amounts) into the FHIR
-// entry. The provenance signature is the SHA-256 of the exact bundle bytes, so
-// any tampering with the message entry invalidates the envelope.
-func Message(eventType, topic, correlationID, subjectID string, payloadJSON json.RawMessage, extensions map[string]string, principal Provenance, occurredAt time.Time) (Envelope, error) {
+// entry. The provenance signature is a JWS compact serialization (EdDSA over
+// the JCS-canonical envelope excluding the signature field) produced by the
+// mandatory signer; a nil signer fails closed.
+func Message(eventType, topic, correlationID, subjectID string, payloadJSON json.RawMessage, extensions map[string]string, principal Provenance, occurredAt time.Time, signer *Signer) (Envelope, error) {
+	if signer == nil {
+		return Envelope{}, errors.New("an envelope signer is required")
+	}
 	if strings.TrimSpace(eventType) == "" || (topic != TopicBooking && topic != TopicGate && topic != TopicQueue && topic != TopicDeclarations) {
 		return Envelope{}, errors.New("event type and a platform v1 topic are required")
 	}
@@ -145,9 +148,7 @@ func Message(eventType, topic, correlationID, subjectID string, payloadJSON json
 	if err != nil {
 		return Envelope{}, fmt.Errorf("encode FHIR message bundle: %w", err)
 	}
-	sum := sha256.Sum256(bundleJSON)
-	principal.Signature = "sha256:" + hex.EncodeToString(sum[:])
-	return Envelope{
+	envelope := Envelope{
 		EnvelopeVersion: EnvelopeVersion,
 		EventID:         uuid.NewString(),
 		EventType:       eventType,
@@ -157,11 +158,18 @@ func Message(eventType, topic, correlationID, subjectID string, payloadJSON json
 		Classification:  ClassificationIntern,
 		FHIR:            bundleJSON,
 		Provenance:      principal,
-	}, nil
+	}
+	signature, err := signer.Sign(envelope)
+	if err != nil {
+		return Envelope{}, fmt.Errorf("sign %s envelope: %w", eventType, err)
+	}
+	envelope.Provenance.Signature = signature
+	return envelope, nil
 }
 
-// VerifySignature recomputes the provenance signature over the bundle bytes.
-func (envelope Envelope) VerifySignature() bool {
-	sum := sha256.Sum256(envelope.FHIR)
-	return envelope.Provenance.Signature == "sha256:"+hex.EncodeToString(sum[:])
+// VerifySignature verifies the provenance JWS against the producer's public
+// key: alg=EdDSA, a port-interoperability kid, an exact canonical-payload
+// match and a valid Ed25519 signature.
+func (envelope Envelope) VerifySignature(publicKey ed25519.PublicKey) bool {
+	return Verify(envelope, publicKey) == nil
 }
