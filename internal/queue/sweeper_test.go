@@ -116,8 +116,19 @@ func (env sweeperEnv) seedQueuedRequest(t *testing.T, bound context.Context, key
 
 func (env sweeperEnv) requestStatus(t *testing.T, tenantID, queueRequestID string) string {
 	t.Helper()
+	// truck_queue_requests is RLS-enforced, so the read must run inside a
+	// tenant-bound transaction exactly like the production store paths; a raw
+	// pool read only works for roles that bypass RLS (e.g. superuser).
+	tx, err := env.pool.Begin(env.ctx)
+	if err != nil {
+		t.Fatalf("begin tenant-bound read: %v", err)
+	}
+	defer tx.Rollback(env.ctx)
+	if _, err := tx.Exec(env.ctx, "SELECT set_config('app.tenant_id', $1, true)", tenantID); err != nil {
+		t.Fatalf("bind tenant for read: %v", err)
+	}
 	var status string
-	if err := env.pool.QueryRow(env.ctx,
+	if err := tx.QueryRow(env.ctx,
 		`SELECT status FROM truck_queue_requests WHERE tenant_id=$1 AND queue_request_id=$2`,
 		tenantID, queueRequestID).Scan(&status); err != nil {
 		t.Fatalf("read request status for %s/%s: %v", tenantID, queueRequestID, err)
