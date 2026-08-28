@@ -34,7 +34,9 @@ type Provenance struct {
 	LedgerCommitHash string `json:"ledgerCommitHash,omitempty"`
 }
 
-// Envelope is the platform event contract (envelopeVersion 1.0).
+// Envelope is the platform event contract (envelopeVersion 1.0). The FHIR
+// message bundle is emitted under the canonical `fhir` key, matching every
+// other platform producer.
 type Envelope struct {
 	EnvelopeVersion string          `json:"envelopeVersion"`
 	EventID         string          `json:"eventId"`
@@ -43,7 +45,7 @@ type Envelope struct {
 	Producer        string          `json:"producer"`
 	CorrelationID   string          `json:"correlationId"`
 	Classification  string          `json:"classification"`
-	Bundle          json.RawMessage `json:"bundle"`
+	FHIR            json.RawMessage `json:"fhir"`
 	Provenance      Provenance      `json:"provenance"`
 }
 
@@ -149,13 +151,13 @@ func Message(eventType, topic, correlationID, subjectID string, payloadJSON json
 		Producer:        Producer,
 		CorrelationID:   correlationID,
 		Classification:  ClassificationIntern,
-		Bundle:          bundleJSON,
+		FHIR:            bundleJSON,
 		Provenance:      principal,
 	}, nil
 }
 
 // VerifySignature recomputes the provenance signature over the bundle bytes.
 func (envelope Envelope) VerifySignature() bool {
-	sum := sha256.Sum256(envelope.Bundle)
+	sum := sha256.Sum256(envelope.FHIR)
 	return envelope.Provenance.SignatureSHA256 == "sha256:"+hex.EncodeToString(sum[:])
 }

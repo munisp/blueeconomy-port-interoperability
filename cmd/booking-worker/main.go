@@ -1,7 +1,9 @@
 // booking-worker runs the Temporal worker for ECallUpBookingWorkflow and
 // ECallUpCallUpWorkflow, plus the call-up queue sweeper (grace-window
-// forfeiture chain and idempotent call-up workflow starts). It fails closed
-// unless Temporal, PostgreSQL and TigerBeetle are all configured.
+// forfeiture chain and idempotent call-up workflow starts) across every
+// active tenant — or only WORKER_TENANT_ID when that optional restriction is
+// set. It fails closed unless Temporal, PostgreSQL and TigerBeetle are all
+// configured.
 package main
 
 import (
@@ -19,7 +21,6 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/customs"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/ledger"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
-	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 )
@@ -38,7 +39,9 @@ func run() error {
 	databaseURL := requiredEnv("DATABASE_URL")
 	clusterID := requiredEnv("TIGERBEETLE_CLUSTER_ID")
 	addresses := strings.Split(requiredEnv("TIGERBEETLE_ADDRESSES"), ",")
-	tenantID := requiredEnv("WORKER_TENANT_ID")
+	// WORKER_TENANT_ID is an optional restriction: when set the sweeper only
+	// serves that tenant; when unset it sweeps every active tenant.
+	tenantID := os.Getenv("WORKER_TENANT_ID")
 	graceMinutes, err := strconv.Atoi(defaultEnv("CALLUP_GRACE_MINUTES", "90"))
 	if err != nil || graceMinutes < 1 {
 		return errors.New("CALLUP_GRACE_MINUTES must be a positive integer")
@@ -122,9 +125,14 @@ func run() error {
 	bookingWorker.RegisterActivity(activities)
 	bookingWorker.RegisterActivity(callUpActivities)
 
+	sweeper, err := queue.NewSweeper(pool, queueStore, callUps, tenantID)
+	if err != nil {
+		return fmt.Errorf("configure call-up sweeper: %w", err)
+	}
+
 	sweepCtx, stopSweep := context.WithCancel(context.Background())
 	defer stopSweep()
-	go sweepCallUps(sweepCtx, queueStore, callUps, tenantID, time.Duration(sweepSeconds)*time.Second)
+	go sweepCallUps(sweepCtx, sweeper, time.Duration(sweepSeconds)*time.Second)
 
 	log.Printf("booking-worker polling task queue %s", taskQueue)
 	if err := bookingWorker.Run(worker.InterruptCh()); err != nil {
@@ -133,45 +141,13 @@ func run() error {
 	return nil
 }
 
-// sweepCallUps forfeits elapsed grace windows (chaining next-in-queue
-// promotions), fills freed call-up capacity and idempotently starts a
-// grace-window workflow for every active call-up.
-func sweepCallUps(ctx context.Context, store *queue.Store, callUps queue.CallUpOrchestrator, tenantID string, interval time.Duration) {
-	principal := queue.Principal{ID: "booking-worker", Role: "callup-engine"}
+// sweepCallUps runs the multi-tenant call-up sweeper immediately and then on
+// every interval tick. Sweep failures are logged and retried on the next
+// tick; unreconciled call-ups remain visible to the next pass.
+func sweepCallUps(ctx context.Context, sweeper *queue.Sweeper, interval time.Duration) {
 	sweep := func() {
-		bound, err := tenantctx.WithClaims(ctx, tenantctx.Claims{
-			Issuer:   "booking-worker",
-			Audience: "s1-port-interoperability",
-			TenantID: tenantID,
-			Subject:  "booking-worker",
-			Expires:  time.Now().Add(time.Hour).Unix(),
-		})
-		if err != nil {
-			log.Printf("call-up sweep tenant binding: %v", err)
-			return
-		}
-		if _, err := store.ReconcileCallUps(bound, principal); err != nil {
-			log.Printf("call-up sweep reconcile: %v", err)
-			return
-		}
-		active, err := store.ListActiveCallUps(bound)
-		if err != nil {
-			log.Printf("call-up sweep list active: %v", err)
-			return
-		}
-		for _, request := range active {
-			if request.GraceDeadline == nil {
-				continue
-			}
-			if err := callUps.StartCallUpWorkflow(bound, queue.CallUpWorkflowInput{
-				QueueRequestID: request.QueueRequestID,
-				TenantID:       request.TenantID,
-				PrincipalID:    principal.ID,
-				TerminalID:     request.TerminalID,
-				GraceDeadline:  *request.GraceDeadline,
-			}); err != nil {
-				log.Printf("call-up sweep start workflow %s: %v", request.QueueRequestID, err)
-			}
+		if err := sweeper.SweepOnce(ctx); err != nil {
+			log.Printf("call-up sweep: %v", err)
 		}
 	}
 	sweep()

@@ -33,7 +33,7 @@ func TestMessageBuildsCompliantEnvelope(t *testing.T) {
 			} `json:"resource"`
 		} `json:"entry"`
 	}
-	if err := json.Unmarshal(envelope.Bundle, &bundle); err != nil {
+	if err := json.Unmarshal(envelope.FHIR, &bundle); err != nil {
 		t.Fatalf("decode FHIR bundle: %v", err)
 	}
 	if bundle.ResourceType != "Bundle" || bundle.Type != "message" || len(bundle.Entry) != 1 {
@@ -44,6 +44,20 @@ func TestMessageBuildsCompliantEnvelope(t *testing.T) {
 	}
 	if !envelope.VerifySignature() {
 		t.Fatal("envelope provenance signature must verify")
+	}
+	serialized, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(serialized, &keys); err != nil {
+		t.Fatalf("decode serialized envelope: %v", err)
+	}
+	if _, ok := keys["fhir"]; !ok {
+		t.Fatalf("serialized envelope must carry the canonical fhir key, got keys %v", keys)
+	}
+	if _, ok := keys["bundle"]; ok {
+		t.Fatal("serialized envelope must not use the deferred v2 bundle key")
 	}
 }
 
@@ -79,7 +93,7 @@ func TestMessageSignatureDetectsTampering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build envelope: %v", err)
 	}
-	envelope.Bundle = json.RawMessage(`{"resourceType":"Bundle","type":"message","entry":[]}`)
+	envelope.FHIR = json.RawMessage(`{"resourceType":"Bundle","type":"message","entry":[]}`)
 	if envelope.VerifySignature() {
 		t.Fatal("tampered bundle must fail signature verification")
 	}

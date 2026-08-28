@@ -262,16 +262,16 @@ func (runner *Runner) attempt(ctx context.Context, tx pgx.Tx, delivery Delivery)
 // envelope; callers fall back to the event id.
 func envelopeSubjectID(payload string) string {
 	var probe struct {
-		Bundle struct {
+		FHIR struct {
 			Entry []struct {
 				Resource struct {
 					ID string `json:"id"`
 				} `json:"resource"`
 			} `json:"entry"`
-		} `json:"bundle"`
+		} `json:"fhir"`
 	}
-	if json.Unmarshal([]byte(payload), &probe) != nil || len(probe.Bundle.Entry) == 0 {
+	if json.Unmarshal([]byte(payload), &probe) != nil || len(probe.FHIR.Entry) == 0 {
 		return ""
 	}
-	return probe.Bundle.Entry[0].Resource.ID
+	return probe.FHIR.Entry[0].Resource.ID
 }
