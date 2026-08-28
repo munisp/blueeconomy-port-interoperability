@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/customs"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantdb"
@@ -53,7 +54,7 @@ func (store *Store) capacityReleased(ctx context.Context, tx pgx.Tx, claims tena
 		return nil
 	}
 	switch before.Status {
-	case StatusSlotReserved, StatusPaid, StatusGateApproved:
+	case StatusSlotReserved, StatusPaid, StatusValidationPending, StatusGateApproved:
 		return store.listener.CapacityReleased(ctx, tx, claims, before.TerminalID, principal)
 	}
 	return nil
@@ -92,14 +93,16 @@ func (store *Store) withTx(ctx context.Context, work func(pgx.Tx, tenantctx.Clai
 }
 
 const bookingColumns = `booking_id, tenant_id, request_id, truck_plate, trucker_msisdn, terminal_id,
-	slot_id, channel, status, amount_kobo, currency, payment_receipt_ref, gate_id,
+	slot_id, channel, status, amount_kobo, currency, cargo_declaration_ref, declared_weight_kg,
+	consignee_id, operator_id, payment_receipt_ref, gate_id,
 	ledger_commit_hash, reconciliation_reason, created_at, updated_at, expires_at, version`
 
 func scanBooking(row pgx.Row) (Booking, error) {
 	var booking Booking
 	err := row.Scan(&booking.BookingID, &booking.TenantID, &booking.RequestID, &booking.TruckPlate,
 		&booking.TruckerMSISDN, &booking.TerminalID, &booking.SlotID, &booking.Channel, &booking.Status,
-		&booking.AmountKobo, &booking.Currency, &booking.PaymentReceiptRef, &booking.GateID,
+		&booking.AmountKobo, &booking.Currency, &booking.CargoDeclarationRef, &booking.DeclaredWeightKg,
+		&booking.ConsigneeID, &booking.OperatorID, &booking.PaymentReceiptRef, &booking.GateID,
 		&booking.LedgerCommitHash, &booking.ReconciliationReason, &booking.CreatedAt, &booking.UpdatedAt,
 		&booking.ExpiresAt, &booking.Version)
 	return booking, err
@@ -159,6 +162,33 @@ func (store *Store) CreateTerminal(ctx context.Context, terminalID, portCode, na
 		}
 		return nil
 	})
+}
+
+// declarationBinding converts the optional customs declaration fields of a
+// create request into nullable column values.
+func declarationBinding(request CreateRequest) (*string, *int64, *string, *string) {
+	if request.CargoDeclarationRef == "" {
+		return nil, nil, nil, nil
+	}
+	ref := request.CargoDeclarationRef
+	weight := request.DeclaredWeightKg
+	consignee := request.ConsigneeID
+	operator := request.OperatorID
+	return &ref, &weight, &consignee, &operator
+}
+
+func equalStringPtr(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
+}
+
+func equalInt64Ptr(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
 }
 
 func nameTrim(value string) string {
@@ -222,7 +252,7 @@ func (store *Store) ListSlots(ctx context.Context, terminalID string, from, to t
 		rows, err := tx.Query(ctx, `
 			SELECT s.slot_id, s.terminal_id, s.starts_at, s.ends_at, s.capacity, s.created_at,
 				(SELECT count(*) FROM truck_bookings b WHERE b.slot_id = s.slot_id
-					AND b.status IN ('SLOT_RESERVED','PAID','GATE_APPROVED')) AS reserved
+					AND b.status IN ('SLOT_RESERVED','PAID','VALIDATION_PENDING','GATE_APPROVED')) AS reserved
 			FROM terminal_slots s
 			WHERE s.terminal_id = $1 AND s.starts_at < $3 AND s.ends_at > $2
 			ORDER BY s.starts_at`, terminalID, from.UTC(), to.UTC())
@@ -286,22 +316,27 @@ func (store *Store) createTx(ctx context.Context, tx pgx.Tx, claims tenantctx.Cl
 		status = StatusPendingSync
 	}
 	now := time.Now().UTC()
+	declarationRef, declaredWeight, consigneeID, operatorID := declarationBinding(request)
 	booking, err := scanBooking(tx.QueryRow(ctx, `
 		INSERT INTO truck_bookings (
 			booking_id, tenant_id, request_id, truck_plate, trucker_msisdn, terminal_id,
-			channel, status, amount_kobo, currency, created_at, updated_at, expires_at, version
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'NGN',$10,$10,$11,1)
+			channel, status, amount_kobo, currency, cargo_declaration_ref, declared_weight_kg,
+			consignee_id, operator_id, created_at, updated_at, expires_at, version
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'NGN',$10,$11,$12,$13,$14,$14,$15,1)
 		ON CONFLICT (tenant_id, request_id) DO NOTHING
 		RETURNING `+bookingColumns,
 		uuid.New(), claims.TenantID, request.RequestID, request.TruckPlate, request.TruckerMSISDN,
-		request.TerminalID, request.Channel, status, request.AmountKobo, now, request.ExpiresAt.UTC()))
+		request.TerminalID, request.Channel, status, request.AmountKobo, declarationRef, declaredWeight,
+		consigneeID, operatorID, now, request.ExpiresAt.UTC()))
 	if errors.Is(err, pgx.ErrNoRows) {
 		existing, lookupErr := scanBooking(tx.QueryRow(ctx, `SELECT `+bookingColumns+` FROM truck_bookings WHERE tenant_id=$1 AND request_id=$2 FOR UPDATE`, claims.TenantID, request.RequestID))
 		if lookupErr != nil {
 			return Booking{}, fmt.Errorf("lookup idempotent booking: %w", lookupErr)
 		}
 		if existing.TruckPlate != request.TruckPlate || existing.TruckerMSISDN != request.TruckerMSISDN ||
-			existing.TerminalID != request.TerminalID || existing.Channel != request.Channel || existing.AmountKobo != request.AmountKobo {
+			existing.TerminalID != request.TerminalID || existing.Channel != request.Channel || existing.AmountKobo != request.AmountKobo ||
+			!equalStringPtr(existing.CargoDeclarationRef, declarationRef) || !equalInt64Ptr(existing.DeclaredWeightKg, declaredWeight) ||
+			!equalStringPtr(existing.ConsigneeID, consigneeID) || !equalStringPtr(existing.OperatorID, operatorID) {
 			return Booking{}, ErrIdempotencyConflict
 		}
 		return existing, nil
@@ -391,7 +426,7 @@ func slotCapacityFree(ctx context.Context, tx pgx.Tx, slotID string) (bool, Slot
 		return false, Slot{}, fmt.Errorf("lock slot: %w", err)
 	}
 	var active int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM truck_bookings WHERE slot_id=$1 AND status IN ('SLOT_RESERVED','PAID','GATE_APPROVED')`, slotID).Scan(&active); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM truck_bookings WHERE slot_id=$1 AND status IN ('SLOT_RESERVED','PAID','VALIDATION_PENDING','GATE_APPROVED')`, slotID).Scan(&active); err != nil {
 		return false, Slot{}, fmt.Errorf("count slot reservations: %w", err)
 	}
 	return active < slot.Capacity, slot, nil
@@ -589,6 +624,117 @@ func (store *Store) ConfirmPayment(ctx context.Context, bookingID, receiptRef st
 	return paid, err
 }
 
+// hasCustomsMatch reports whether the booking carries a MATCH customs
+// validation. Declaration-carrying bookings may only pass the gate after the
+// Nigeria Customs cross-check has matched.
+func hasCustomsMatch(ctx context.Context, tx pgx.Tx, bookingID string) (bool, error) {
+	var matches int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM customs_validations WHERE booking_id=$1 AND decision='MATCH'`, bookingID).Scan(&matches); err != nil {
+		return false, err
+	}
+	return matches > 0, nil
+}
+
+// BeginCustomsValidation moves a PAID booking that references a cargo
+// declaration into VALIDATION_PENDING. It is idempotent for workflow activity
+// retries: a booking already in VALIDATION_PENDING is returned unchanged, and
+// a booking that already carries a MATCH validation stays PAID.
+func (store *Store) BeginCustomsValidation(ctx context.Context, bookingID string, principal Principal) (Booking, error) {
+	var current Booking
+	err := store.withTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
+		booking, err := store.getForUpdate(ctx, tx, bookingID)
+		if err != nil {
+			return err
+		}
+		if booking.CargoDeclarationRef == nil {
+			return errors.New("booking does not reference a cargo declaration")
+		}
+		switch booking.Status {
+		case StatusValidationPending:
+			current = booking
+			return nil
+		case StatusPaid:
+			matched, err := hasCustomsMatch(ctx, tx, bookingID)
+			if err != nil {
+				return fmt.Errorf("check customs validation: %w", err)
+			}
+			if matched {
+				current = booking
+				return nil
+			}
+			result, err := store.transitionTx(ctx, tx, claims, booking, StatusValidationPending, nil,
+				"booking.customs_validation_pending", map[string]string{
+					"cargo-declaration-ref": *booking.CargoDeclarationRef,
+				}, principal, "")
+			if err != nil {
+				return err
+			}
+			current = result
+			return nil
+		default:
+			return ErrInvalidTransition
+		}
+	})
+	return current, err
+}
+
+// RecordCustomsValidation persists the Nigeria Customs cross-check decision
+// for a VALIDATION_PENDING booking and resolves the gate: a MATCH returns the
+// booking to PAID, a MISMATCH fails it closed into REJECTED with the reason
+// code. Both outcomes emit booking.customs_validated on ports.booking.v1.
+func (store *Store) RecordCustomsValidation(ctx context.Context, bookingID string, evaluation customs.Evaluation, validatedBy string, principal Principal) (Booking, error) {
+	if evaluation.Decision != customs.DecisionMatch && evaluation.Decision != customs.DecisionMismatch {
+		return Booking{}, errors.New("customs validation decision must be MATCH or MISMATCH")
+	}
+	if evaluation.Decision == customs.DecisionMismatch && evaluation.ReasonCode == "" {
+		return Booking{}, errors.New("customs validation mismatch requires a reason code")
+	}
+	if len(validatedBy) < 2 || len(validatedBy) > 256 {
+		return Booking{}, errors.New("customs validator identity is required")
+	}
+	var resolved Booking
+	err := store.withTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
+		booking, err := store.getForUpdate(ctx, tx, bookingID)
+		if err != nil {
+			return err
+		}
+		if booking.Status != StatusValidationPending {
+			return ErrInvalidTransition
+		}
+		if booking.CargoDeclarationRef == nil || *booking.CargoDeclarationRef != evaluation.DeclarationRef {
+			return errors.New("customs validation ref does not match the booking declaration")
+		}
+		now := time.Now().UTC()
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO customs_validations (
+				validation_id, tenant_id, booking_id, declaration_ref, decision, reason_code,
+				customs_status, customs_weight_kg, booking_weight_kg, consignee_id, operator_id,
+				validated_by, validated_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+			uuid.New(), claims.TenantID, bookingID, evaluation.DeclarationRef, evaluation.Decision, evaluation.ReasonCode,
+			evaluation.CustomsStatus, evaluation.CustomsWeightKg, evaluation.BookingWeightKg,
+			evaluation.ConsigneeID, evaluation.OperatorID, validatedBy, now); err != nil {
+			return fmt.Errorf("persist customs validation: %w", err)
+		}
+		next := StatusPaid
+		if evaluation.Decision == customs.DecisionMismatch {
+			next = StatusRejected
+		}
+		result, err := store.transitionTx(ctx, tx, claims, booking, next, nil,
+			"booking.customs_validated", map[string]string{
+				"cargo-declaration-ref": evaluation.DeclarationRef,
+				"decision":              evaluation.Decision,
+				"reason-code":           evaluation.ReasonCode,
+			}, principal, "")
+		if err != nil {
+			return err
+		}
+		resolved = result
+		return nil
+	})
+	return resolved, err
+}
+
 // RecordGateScan is the gate controller check: a scan is approved only when the
 // booking is PAID, carries a payment receipt, the assigned slot exists and the
 // scan happens inside the slot window. Every scan — approved or denied — is
@@ -634,6 +780,15 @@ func (store *Store) RecordGateScan(ctx context.Context, bookingID, gateID, scann
 		}
 		if booking.PaymentReceiptRef == nil {
 			return deny("payment receipt is missing")
+		}
+		if booking.CargoDeclarationRef != nil {
+			matched, err := hasCustomsMatch(ctx, tx, bookingID)
+			if err != nil {
+				return fmt.Errorf("check customs validation: %w", err)
+			}
+			if !matched {
+				return deny("customs validation has not cleared this booking")
+			}
 		}
 		if booking.SlotID == nil {
 			return deny("no slot is assigned to this booking")
@@ -739,7 +894,7 @@ func (store *Store) ExpireDue(ctx context.Context, now time.Time, principal Prin
 	count := 0
 	err := store.withTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
 		rows, err := tx.Query(ctx, `SELECT `+bookingColumns+` FROM truck_bookings
-			WHERE status IN ('SLOT_RESERVED','PAID') AND expires_at < $1 FOR UPDATE SKIP LOCKED`, now.UTC())
+			WHERE status IN ('SLOT_RESERVED','PAID','VALIDATION_PENDING') AND expires_at < $1 FOR UPDATE SKIP LOCKED`, now.UTC())
 		if err != nil {
 			return fmt.Errorf("find expirable bookings: %w", err)
 		}

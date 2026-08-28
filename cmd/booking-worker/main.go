@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/customs"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/ledger"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
@@ -68,6 +69,31 @@ func run() error {
 	activities, err := booking.NewActivities(bookingStore, settlement)
 	if err != nil {
 		return err
+	}
+	// Nigeria Customs cross-validation is mandatory wiring: without a
+	// fail-closed declaration client, declaration-carrying bookings could
+	// never leave VALIDATION_PENDING.
+	customsToleranceBPS, err := strconv.ParseInt(defaultEnv("CUSTOMS_WEIGHT_TOLERANCE_BPS", "500"), 10, 64)
+	if err != nil || customsToleranceBPS < 0 {
+		return errors.New("CUSTOMS_WEIGHT_TOLERANCE_BPS must be a non-negative integer")
+	}
+	customsTimeout, err := time.ParseDuration(defaultEnv("CUSTOMS_TIMEOUT", "10s"))
+	if err != nil || customsTimeout <= 0 {
+		return errors.New("CUSTOMS_TIMEOUT must be a positive duration")
+	}
+	customsValidator, err := customs.NewHTTPValidator(customs.HTTPConfig{
+		BaseURL:        requiredEnv("CUSTOMS_BASE_URL"),
+		BearerToken:    os.Getenv("CUSTOMS_BEARER_TOKEN"),
+		ClientCertFile: os.Getenv("CUSTOMS_CLIENT_CERT_FILE"),
+		ClientKeyFile:  os.Getenv("CUSTOMS_CLIENT_KEY_FILE"),
+		CACertFile:     os.Getenv("CUSTOMS_CA_CERT_FILE"),
+		Timeout:        customsTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("configure customs validator: %w", err)
+	}
+	if err := activities.SetCustomsValidator(customsValidator, customsToleranceBPS); err != nil {
+		return fmt.Errorf("wire customs validator: %w", err)
 	}
 	queueStore, err := queue.NewStore(pool, bookingStore, time.Duration(graceMinutes)*time.Minute)
 	if err != nil {

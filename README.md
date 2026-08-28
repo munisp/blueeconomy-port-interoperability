@@ -24,7 +24,7 @@ provide approved interface profiles and non-production endpoints.
                                                      ▼                            ▼
  USSD (Africa's Talking POST) ──► cmd/ussd-gateway ──► booking.Directory    PostgreSQL
         sessions in Redis (TTL, fail-closed)             │                  (migrations
-                                                        ▼                   0001–0010)
+                                                        ▼                   0001–0011)
  payments.Gateway (Mojaloop, HTTPS + bearer, idempotent request_id)
  booking.Orchestrator (Temporal): ECallUpBookingWorkflow
         receipt-check ─► gate-scan approval ─► TigerBeetle commit ─► audit commit
@@ -129,14 +129,60 @@ eCallUp 2.0 truck call-up queue (new):
   the same transactional `platform_outbox` (classification `INTERNAL`,
   provenance principal + SHA-256 bundle signature).
 
+Nigeria Customs cross-validation (new, migration 0011):
+
+- A booking may bind a cargo declaration (`cargo_declaration_ref`,
+  `declared_weight_kg`, `consignee_id`, `operator_id` — all-or-none at create,
+  enforced by DB CHECK). Declaration-carrying bookings must clear the Nigeria
+  Customs declaration surface before gate approval.
+- State machine gate: `PAID -> VALIDATION_PENDING -> PAID` on MATCH, or
+  `VALIDATION_PENDING -> REJECTED` with a stable reason code
+  (`DECLARATION_NOT_FOUND`, `DECLARATION_STATUS_INVALID`,
+  `WEIGHT_TOLERANCE_EXCEEDED`, `CONSIGNEE_MISMATCH`, `OPERATOR_MISMATCH`).
+  `VALIDATION_PENDING` still occupies slot capacity; gate scans of
+  declaration-carrying bookings re-check for a MATCH row, fail-closed.
+- Rules: declaration exists, status `VALID`/`RELEASED`, declared cargo weight
+  within `CUSTOMS_WEIGHT_TOLERANCE_BPS` (inclusive boundary) of the booking
+  declaration, consignee and operator match.
+- The `CustomsValidator` HTTP client is fail-closed: HTTPS only, bearer or
+  mTLS per config, bounded body, explicit timeout. Validator unreachable → the
+  booking stays `VALIDATION_PENDING` (activity retries); mismatch → `REJECTED`.
+- Workflow ordering is receipt-check → customs-validation → gate-scan →
+  ledger → audit-commit. Every decision is persisted to
+  `customs_validations` (append-only, tenant RLS) and emitted as
+  `booking.customs_validated` on `ports.booking.v1` (envelope v1.0,
+  classification `INTERNAL`) with decision + reason code.
+
+NSW outbound adapter (`cmd/nsw-adapter`, new):
+
+- Drains NSW-relevant outbox rows — `booking.drafted`/`booking.paid`, gate
+  scan decisions, `port_call.clearance_decided`, `queue.called_up` — and posts
+  them to the NSW operator endpoint as signed messages, mirroring the inbound
+  security posture: RS256 compact JWS (`X-NSW-Signature`) with `kid` header
+  and `iss`/`aud`/`sub`/`tenant_id`/`jti`/`exp` claims plus a
+  `payload_sha256` claim binding the signature to the exact body bytes.
+- HTTPS-only with a pinned CA (`NSW_CA_CERT_FILE`), redirects never followed,
+  bounded response body, per-attempt timeout. A 409 replay dedup counts as
+  delivered (the `jti` is stable per delivery). Fail-closed: no signing key,
+  no pinned CA or a non-HTTPS endpoint refuses startup.
+- At-least-once with per-event state in `nsw_delivery` (tenant RLS):
+  `PENDING -> DELIVERED`, or `PENDING -> FAILED_PERMANENT` after
+  `NSW_MAX_ATTEMPTS` with exponential backoff (`NSW_BACKOFF_BASE` doubling,
+  capped at `NSW_BACKOFF_MAX`). Nothing is silently dropped.
+- Content negotiation by config: `application/json` (default, raw envelope)
+  or `application/xml` — the documented `NSWPortCallEvent` v1.0 schema
+  (`EventID`, `CallReference`, `EventType`, `OccurredAt`, `TenantID`,
+  `PayloadSHA256`, `Payload`).
+
 ## Processes
 
 | Command | Purpose | Required env (fail-closed) |
 | --- | --- | --- |
 | `cmd/port-interoperability` | HTTP API (port calls, bookings, call-up queue, gate scans, NSW ingress) | `DATABASE_URL`, `MIGRATION_PATH`, `PORT`, `AUTH_MODE=loopback_trusted_proxy`, `TENANT_GATEWAY_KEY` (≥32 bytes) / `_ISS` / `_AUD`, `NSW_JWKS_URL` (HTTPS) / `NSW_JWKS_PIN_SHA256` / `NSW_ALLOWED_KIDS` / `NSW_ISSUER` / `NSW_AUDIENCE`, `MOJALOOP_BASE_URL` (HTTPS) / `MOJALOOP_BEARER_TOKEN`, `TEMPORAL_ADDRESS` / `_NAMESPACE` / `_TASK_QUEUE`, `FGN_SHARE_BASIS_POINTS` (optional `CALLUP_GRACE_MINUTES`, default 90) |
 | `cmd/ussd-gateway` | USSD callback handler | `REDIS_URL`, `DATABASE_URL`, `MIGRATION_PATH`, `PORT`, `USSD_TENANT_ID` (optional `USSD_SESSION_TTL_SECONDS`, default 300) |
-| `cmd/booking-worker` | Temporal worker for `ECallUpBookingWorkflow` and `ECallUpCallUpWorkflow`, plus the call-up sweeper | `TEMPORAL_ADDRESS` / `_NAMESPACE` / `_TASK_QUEUE`, `DATABASE_URL`, `TIGERBEETLE_CLUSTER_ID`, `TIGERBEETLE_ADDRESSES`, `WORKER_TENANT_ID` (optional `CALLUP_GRACE_MINUTES` default 90, `QUEUE_SWEEP_INTERVAL_SECONDS` default 60) |
+| `cmd/booking-worker` | Temporal worker for `ECallUpBookingWorkflow` and `ECallUpCallUpWorkflow`, plus the call-up sweeper | `TEMPORAL_ADDRESS` / `_NAMESPACE` / `_TASK_QUEUE`, `DATABASE_URL`, `TIGERBEETLE_CLUSTER_ID`, `TIGERBEETLE_ADDRESSES`, `WORKER_TENANT_ID`, `CUSTOMS_BASE_URL` (HTTPS) + exactly one of `CUSTOMS_BEARER_TOKEN` or `CUSTOMS_CLIENT_CERT_FILE` + `CUSTOMS_CLIENT_KEY_FILE` (optional `CUSTOMS_CA_CERT_FILE` pinned CA, `CUSTOMS_TIMEOUT` default 10s, `CUSTOMS_WEIGHT_TOLERANCE_BPS` default 500, `CALLUP_GRACE_MINUTES` default 90, `QUEUE_SWEEP_INTERVAL_SECONDS` default 60) |
 | `cmd/outbox-publisher` | Kafka publisher for `platform_outbox` | `DATABASE_URL`, `KAFKA_BROKERS` (optional `OUTBOX_BATCH_SIZE`, `OUTBOX_POLL_INTERVAL`) |
+| `cmd/nsw-adapter` | Signed NSW outbound delivery of NSW-relevant outbox events | `DATABASE_URL`, `NSW_ENDPOINT_URL` (HTTPS), `NSW_CA_CERT_FILE` (pinned CA), `NSW_SIGNING_KEY_FILE` (PEM RSA ≥2048), `NSW_SIGNING_KID`, `NSW_OUTBOUND_AUDIENCE` (optional `NSW_OUTBOUND_ISSUER` default `s1-port-interoperability`, `NSW_OUTBOUND_SUBJECT` default `nsw-adapter`, `NSW_TOKEN_TTL` default 5m, `NSW_CONTENT_TYPE` `application/json` default or `application/xml`, `NSW_TIMEOUT` default 10s, `NSW_MAX_ATTEMPTS` default 8, `NSW_BACKOFF_BASE` default 5s, `NSW_BACKOFF_MAX` default 10m, `NSW_BATCH_SIZE` default 100, `NSW_POLL_INTERVAL` default 5s, `NSW_MAX_BODY_BYTES` default 1 MiB) |
 
 Optional: `NSW_REPLAY_TTL_MINUTES` (default 1440).
 
@@ -149,7 +195,7 @@ scripts/verify-local.sh
 ```
 
 The script starts a real PostgreSQL 16.4 container, applies migrations
-0001–0010, mints local gateway tenant tokens, and verifies the tenant-wired
+0001–0011, mints local gateway tenant tokens, and verifies the tenant-wired
 port-call flow (create, replay, conflicts, documents, clearance), cross-tenant
 invisibility, the booking state machine over HTTP, slot capacity enforcement,
 offline reconciliation surfacing, gate denial for unpaid bookings and outbox
@@ -171,6 +217,16 @@ database keeps the package race-safe against the booking schema reset:
 ```bash
 QUEUE_TEST_DATABASE_URL='postgres://blueeconomy:local-only-integration-password@127.0.0.1:55433/blueeconomy_port?sslmode=disable' \
   go test ./internal/queue/ -v
+```
+
+PostgreSQL-backed customs-gate and NSW delivery tests run against the same
+database (`NSW_TEST_DATABASE_URL` falls back to `BOOKING_TEST_DATABASE_URL`):
+
+```bash
+BOOKING_TEST_DATABASE_URL='postgres://blueeconomy:local-only-integration-password@127.0.0.1:55433/blueeconomy_port?sslmode=disable' \
+  go test ./internal/booking/ -run 'TestCustoms' -v
+NSW_TEST_DATABASE_URL='postgres://blueeconomy:local-only-integration-password@127.0.0.1:55433/blueeconomy_port?sslmode=disable' \
+  go test ./internal/nswadapter/ -run 'TestDrain' -v
 ```
 
 Unit tests (state machine, JWS signature suite, USSD session flow, Temporal

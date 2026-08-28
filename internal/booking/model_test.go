@@ -29,6 +29,35 @@ func TestStateMachineOfflineSyncPaths(t *testing.T) {
 	}
 }
 
+func TestStateMachineCustomsGatePaths(t *testing.T) {
+	allowed := [][2]Status{
+		{StatusPaid, StatusValidationPending},
+		{StatusValidationPending, StatusPaid},     // customs MATCH restores gate eligibility
+		{StatusValidationPending, StatusRejected}, // customs MISMATCH fails closed
+		{StatusValidationPending, StatusExpired},
+		{StatusValidationPending, StatusCancelled},
+		{StatusRejected, StatusCancelled},
+	}
+	for _, pair := range allowed {
+		if !ValidTransition(pair[0], pair[1]) {
+			t.Fatalf("transition %s -> %s must be allowed", pair[0], pair[1])
+		}
+	}
+	violations := [][2]Status{
+		{StatusValidationPending, StatusGateApproved}, // gate before customs clearance
+		{StatusValidationPending, StatusCompleted},
+		{StatusRejected, StatusPaid}, // rejected bookings cannot be resurrected
+		{StatusRejected, StatusGateApproved},
+		{StatusRejected, StatusCompleted},
+		{StatusPaid, StatusRejected}, // rejection only from the validation gate
+	}
+	for _, pair := range violations {
+		if ValidTransition(pair[0], pair[1]) {
+			t.Fatalf("transition %s -> %s must be prohibited (fail-closed)", pair[0], pair[1])
+		}
+	}
+}
+
 func TestStateMachineRejectsViolations(t *testing.T) {
 	violations := [][2]Status{
 		{StatusDrafted, StatusPaid},                // cannot pay before a slot is reserved
@@ -53,7 +82,7 @@ func TestStateMachineRejectsViolations(t *testing.T) {
 }
 
 func TestStateMachineHasNoSelfTransitions(t *testing.T) {
-	for _, status := range []Status{StatusDrafted, StatusPendingSync, StatusSlotReserved, StatusPaid, StatusGateApproved, StatusCompleted, StatusCancelled, StatusExpired, StatusReconciliationRequired} {
+	for _, status := range []Status{StatusDrafted, StatusPendingSync, StatusSlotReserved, StatusPaid, StatusValidationPending, StatusGateApproved, StatusCompleted, StatusCancelled, StatusExpired, StatusRejected, StatusReconciliationRequired} {
 		if ValidTransition(status, status) {
 			t.Fatalf("self transition %s -> %s must be prohibited", status, status)
 		}

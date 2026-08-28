@@ -18,10 +18,12 @@ const (
 	StatusPendingSync            Status = "PENDING_SYNC"
 	StatusSlotReserved           Status = "SLOT_RESERVED"
 	StatusPaid                   Status = "PAID"
+	StatusValidationPending      Status = "VALIDATION_PENDING"
 	StatusGateApproved           Status = "GATE_APPROVED"
 	StatusCompleted              Status = "COMPLETED"
 	StatusCancelled              Status = "CANCELLED"
 	StatusExpired                Status = "EXPIRED"
+	StatusRejected               Status = "REJECTED"
 	StatusReconciliationRequired Status = "RECONCILIATION_REQUIRED"
 )
 
@@ -62,12 +64,22 @@ var transitions = map[Status]map[Status]bool{
 		StatusCancelled: true,
 	},
 	StatusPaid: {
-		StatusGateApproved: true,
-		StatusExpired:      true,
-		StatusCancelled:    true,
+		StatusGateApproved:      true,
+		StatusValidationPending: true, // customs cross-validation starts
+		StatusExpired:           true,
+		StatusCancelled:         true,
+	},
+	StatusValidationPending: {
+		StatusPaid:      true, // customs validation matched: gate eligibility restored
+		StatusRejected:  true, // customs validation mismatch: fail closed with reason code
+		StatusExpired:   true,
+		StatusCancelled: true,
 	},
 	StatusGateApproved: {
 		StatusCompleted: true,
+	},
+	StatusRejected: {
+		StatusCancelled: true,
 	},
 	StatusReconciliationRequired: {
 		StatusSlotReserved: true, // operator resolves conflict against a different slot
@@ -80,10 +92,11 @@ func ValidTransition(current, next Status) bool {
 }
 
 var (
-	truckPlatePattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9-]{2,15}$`)
-	msisdnPattern     = regexp.MustCompile(`^\+[0-9]{8,15}$`)
-	terminalPattern   = regexp.MustCompile(`^[A-Z][A-Z0-9-]{1,31}$`)
-	portCodePattern   = regexp.MustCompile(`^[A-Z]{2,8}$`)
+	truckPlatePattern     = regexp.MustCompile(`^[A-Z0-9][A-Z0-9-]{2,15}$`)
+	msisdnPattern         = regexp.MustCompile(`^\+[0-9]{8,15}$`)
+	terminalPattern       = regexp.MustCompile(`^[A-Z][A-Z0-9-]{1,31}$`)
+	portCodePattern       = regexp.MustCompile(`^[A-Z]{2,8}$`)
+	declarationRefPattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9/-]{3,63}$`)
 )
 
 type CreateRequest struct {
@@ -94,6 +107,12 @@ type CreateRequest struct {
 	Channel       Channel   `json:"channel"`
 	AmountKobo    int64     `json:"amount_kobo"`
 	ExpiresAt     time.Time `json:"expires_at"`
+	// Optional Nigeria Customs cargo declaration binding. When present, the
+	// booking must clear customs cross-validation before gate approval.
+	CargoDeclarationRef string `json:"cargo_declaration_ref,omitempty"`
+	DeclaredWeightKg    int64  `json:"declared_weight_kg,omitempty"`
+	ConsigneeID         string `json:"consignee_id,omitempty"`
+	OperatorID          string `json:"operator_id,omitempty"`
 }
 
 type Booking struct {
@@ -108,6 +127,10 @@ type Booking struct {
 	Status               Status    `json:"status"`
 	AmountKobo           int64     `json:"amount_kobo"`
 	Currency             string    `json:"currency"`
+	CargoDeclarationRef  *string   `json:"cargo_declaration_ref,omitempty"`
+	DeclaredWeightKg     *int64    `json:"declared_weight_kg,omitempty"`
+	ConsigneeID          *string   `json:"consignee_id,omitempty"`
+	OperatorID           *string   `json:"operator_id,omitempty"`
 	PaymentReceiptRef    *string   `json:"payment_receipt_ref,omitempty"`
 	GateID               *string   `json:"gate_id,omitempty"`
 	LedgerCommitHash     *string   `json:"ledger_commit_hash,omitempty"`
@@ -173,6 +196,24 @@ func (request CreateRequest) Validate() error {
 	}
 	if request.ExpiresAt.IsZero() || request.ExpiresAt.Before(time.Now().UTC()) {
 		return errors.New("expires_at must be in the future")
+	}
+	if request.CargoDeclarationRef == "" {
+		if request.DeclaredWeightKg != 0 || request.ConsigneeID != "" || request.OperatorID != "" {
+			return errors.New("customs declaration fields require cargo_declaration_ref")
+		}
+		return nil
+	}
+	if !declarationRefPattern.MatchString(request.CargoDeclarationRef) {
+		return errors.New("cargo_declaration_ref is invalid")
+	}
+	if request.DeclaredWeightKg <= 0 {
+		return errors.New("declared_weight_kg must be positive when a cargo declaration is referenced")
+	}
+	if len(request.ConsigneeID) < 2 || len(request.ConsigneeID) > 128 || request.ConsigneeID != strings.TrimSpace(request.ConsigneeID) {
+		return errors.New("consignee_id must be canonical text between 2 and 128 characters")
+	}
+	if len(request.OperatorID) < 2 || len(request.OperatorID) > 128 || request.OperatorID != strings.TrimSpace(request.OperatorID) {
+		return errors.New("operator_id must be canonical text between 2 and 128 characters")
 	}
 	return nil
 }
