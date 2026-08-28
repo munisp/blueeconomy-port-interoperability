@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +39,7 @@ func testSigner(t *testing.T) *events.Signer {
 
 type testEnv struct {
 	store   *Store
+	signer  *events.Signer
 	ctx     context.Context
 	cleanup func()
 }
@@ -49,7 +51,8 @@ func newTestEnv(t *testing.T) testEnv {
 		t.Skip("DECLARATIONS_TEST_DATABASE_URL is not set; skipping PostgreSQL-backed declaration tests")
 	}
 	ctx := context.Background()
-	store, err := Open(ctx, databaseURL, testSigner(t))
+	signer := testSigner(t)
+	store, err := Open(ctx, databaseURL, signer)
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
@@ -85,7 +88,7 @@ func newTestEnv(t *testing.T) testEnv {
 	if err != nil {
 		t.Fatalf("bind test tenant claims: %v", err)
 	}
-	return testEnv{store: store, ctx: bound, cleanup: store.Close}
+	return testEnv{store: store, signer: signer, ctx: bound, cleanup: store.Close}
 }
 
 func createRequest(requestID string) CreateRequest {
@@ -152,7 +155,7 @@ func (env testEnv) outboxEvents(t *testing.T) []map[string]any {
 	return events
 }
 
-func assertEnvelopeV1(t *testing.T, envelope map[string]any, wantEventType string) {
+func assertEnvelopeV1(t *testing.T, signer *events.Signer, envelope map[string]any, wantEventType string) {
 	t.Helper()
 	if envelope["_topic"] != "trade.declarations.v1" {
 		t.Fatalf("topic = %v, want trade.declarations.v1", envelope["_topic"])
@@ -174,8 +177,19 @@ func assertEnvelopeV1(t *testing.T, envelope map[string]any, wantEventType strin
 		t.Fatal("envelope must carry provenance")
 	}
 	signature, ok := provenance["signature"].(string)
-	if !ok || len(signature) != len("sha256:")+64 {
-		t.Fatalf("provenance.signature must be the canonical sha256 digest, got %v", provenance["signature"])
+	if !ok || len(strings.Split(signature, ".")) != 3 {
+		t.Fatalf("provenance.signature must be a JWS compact serialization, got %v", provenance["signature"])
+	}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("re-encode envelope for verification: %v", err)
+	}
+	var typed events.Envelope
+	if err := json.Unmarshal(encoded, &typed); err != nil {
+		t.Fatalf("decode typed envelope for verification: %v", err)
+	}
+	if err := events.Verify(typed, signer.PublicKey()); err != nil {
+		t.Fatalf("provenance JWS must verify against the signer public key: %v", err)
 	}
 	if _, leaked := provenance["signatureSha256"]; leaked {
 		t.Fatal("provenance must not emit the legacy signatureSha256 key")
@@ -245,9 +259,9 @@ func TestDeclarationLifecycleClearsGreenLaneWithCertificateAndEvents(t *testing.
 	if len(events) != 3 {
 		t.Fatalf("outbox events = %d, want 3 (submitted, risk-assessed, cleared)", len(events))
 	}
-	assertEnvelopeV1(t, events[0], EventSubmitted)
-	assertEnvelopeV1(t, events[1], EventCleared)
-	assertEnvelopeV1(t, events[2], EventRiskAssessed)
+	assertEnvelopeV1(t, env.signer, events[0], EventSubmitted)
+	assertEnvelopeV1(t, env.signer, events[1], EventCleared)
+	assertEnvelopeV1(t, env.signer, events[2], EventRiskAssessed)
 }
 
 func TestScorerOutageParksDeclarationScoringUnavailable(t *testing.T) {
@@ -312,9 +326,9 @@ func TestScorerOutageParksDeclarationScoringUnavailable(t *testing.T) {
 	if len(events) != 3 {
 		t.Fatalf("outbox events = %d, want 3 (submitted, scoring-unavailable, amended)", len(events))
 	}
-	assertEnvelopeV1(t, events[0], EventSubmitted)
-	assertEnvelopeV1(t, events[1], EventScoringUnavailable)
-	assertEnvelopeV1(t, events[2], EventAmended)
+	assertEnvelopeV1(t, env.signer, events[0], EventSubmitted)
+	assertEnvelopeV1(t, env.signer, events[1], EventScoringUnavailable)
+	assertEnvelopeV1(t, env.signer, events[2], EventAmended)
 }
 
 func TestDeclarationRejectsIllegalTransitions(t *testing.T) {
