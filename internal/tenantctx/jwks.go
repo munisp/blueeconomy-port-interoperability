@@ -19,6 +19,8 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"os"
 	"strings"
 	"sync"
@@ -73,7 +75,9 @@ func NewJWKSVerifier(jwksURL, issuer, audience, caFile string) (*JWKSVerifier, e
 		audience: audience,
 		jwksURL:  jwksURL,
 		client: &http.Client{
-			Transport: transport,
+			// otelhttp transport: JWKS fetches become CLIENT spans (no-op
+			// when telemetry is disabled).
+			Transport: otelhttp.NewTransport(transport),
 			Timeout:   10 * time.Second,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return errors.New("JWKS redirects are not permitted")

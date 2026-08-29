@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"strings"
 
+	temporalotel "go.temporal.io/sdk/contrib/opentelemetry"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/temporal"
 )
 
@@ -29,9 +31,16 @@ func NewTemporalCallUpOrchestrator(address, namespace, taskQueue string) (*Tempo
 	if strings.TrimSpace(address) == "" || strings.TrimSpace(namespace) == "" || strings.TrimSpace(taskQueue) == "" {
 		return nil, errors.New("TEMPORAL_ADDRESS, TEMPORAL_NAMESPACE and TEMPORAL_TASK_QUEUE are required")
 	}
+	// Temporal OTel client interceptor: workflow starts carry the caller's
+	// trace context into the workflow (no-op when telemetry is disabled).
+	tracingInterceptor, err := temporalotel.NewTracingInterceptor(temporalotel.TracerOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("build temporal tracing interceptor: %w", err)
+	}
 	temporalClient, err := client.Dial(client.Options{
-		HostPort:  address,
-		Namespace: namespace,
+		HostPort:     address,
+		Namespace:    namespace,
+		Interceptors: []interceptor.ClientInterceptor{tracingInterceptor},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dial temporal: %w", err)

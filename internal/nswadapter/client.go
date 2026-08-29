@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // Client posts signed NSW handoff messages to the operator endpoint. It is
@@ -30,9 +32,11 @@ func NewClient(config Config) (*Client, error) {
 		endpoint: config.EndpointURL,
 		http: &http.Client{
 			Timeout: config.Timeout,
-			Transport: &http.Transport{
+			// otelhttp transport: NSW deliveries become CLIENT spans (no-op
+			// when telemetry is disabled).
+			Transport: otelhttp.NewTransport(&http.Transport{
 				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool},
-			},
+			}),
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				// Fail closed: a redirect could steer signed payloads to an
 				// unintended host, so redirects are surfaced as responses.

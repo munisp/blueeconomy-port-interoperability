@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"strings"
 	"time"
 )
@@ -78,7 +80,17 @@ func NewMojaloop(baseURL, token string, client *http.Client) (*MojaloopGateway, 
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
-	return &MojaloopGateway{baseURL: strings.TrimRight(baseURL, "/"), token: token, client: client}, nil
+	// otelhttp transport: FSPIOP calls become CLIENT spans with the live
+	// traceparent injected (no-op when telemetry is disabled). An existing
+	// client keeps its own timeout/redirect policy; only the transport is
+	// wrapped when none was set, otherwise wrap its transport.
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	wrapped := *client
+	wrapped.Transport = otelhttp.NewTransport(base)
+	return &MojaloopGateway{baseURL: strings.TrimRight(baseURL, "/"), token: token, client: &wrapped}, nil
 }
 
 type transactionRequest struct {

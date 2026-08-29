@@ -14,6 +14,7 @@ import (
 
 	riskscorev1 "github.com/munisp/blueeconomy-contracts/gen/go/blueeconomy/riskscore/v1"
 	"github.com/sony/gobreaker/v2"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -146,6 +147,10 @@ func NewGRPCScorer(config GRPCScorerConfig) (*GRPCScorer, error) {
 		}
 		dialOptions = append(dialOptions, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
 	}
+	// otelgrpc stats handler: every scorer RPC becomes a CLIENT span joining
+	// the caller's trace (W3C tracecontext in gRPC metadata); no-op when
+	// telemetry is disabled.
+	dialOptions = append(dialOptions, grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
 	dialOptions = append(dialOptions, config.DialOptions...)
 	conn, err := grpc.NewClient(config.Address, dialOptions...)
 	if err != nil {

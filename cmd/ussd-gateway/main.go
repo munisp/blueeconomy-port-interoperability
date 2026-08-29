@@ -17,12 +17,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/telemetry"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/ussd"
+	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -56,10 +57,34 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Telemetry: disabled without OTEL_EXPORTER_OTLP_ENDPOINT (boot
+	// unaffected); enabled export is async/batched and collector-down is
+	// drop-with-metric, never a request failure.
+	telemetryConfig, err := telemetry.LoadConfig("blueeconomy-port-interoperability")
+	if err != nil {
+		return fmt.Errorf("load telemetry config: %w", err)
+	}
+	telemetryPipeline, err := telemetry.Setup(ctx, telemetryConfig)
+	if err != nil {
+		return fmt.Errorf("setup telemetry: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), telemetry.ShutdownFlushTimeout)
+		defer cancel()
+		if err := telemetryPipeline.Shutdown(shutdownCtx); err != nil {
+			log.Printf("telemetry shutdown: %v", err)
+		}
+	}()
+
 	if err := redisClient.Ping(ctx).Err(); err != nil {
 		return fmt.Errorf("ping redis: %w", err)
 	}
-	pool, err := pgxpool.New(ctx, databaseURL)
+	// redisotel client instrumentation (no-op spans when telemetry disabled).
+	if err := redisotel.InstrumentTracing(redisClient); err != nil {
+		return fmt.Errorf("instrument redis client: %w", err)
+	}
+	pool, err := telemetry.NewPGXPool(ctx, databaseURL)
 	if err != nil {
 		return fmt.Errorf("open postgres: %w", err)
 	}
@@ -142,8 +167,10 @@ func run() error {
 	mux.Handle("POST /ussd/callback", authenticated)
 
 	httpServer := &http.Server{
-		Addr:              ":" + port,
-		Handler:           mux,
+		Addr: ":" + port,
+		// otelhttp server middleware: traceparent/baggage extraction,
+		// route-pattern span names, tenant.id/agency baggage → attributes.
+		Handler:           telemetryPipeline.Middleware(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,

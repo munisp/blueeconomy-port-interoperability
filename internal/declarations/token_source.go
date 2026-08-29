@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // TokenSource supplies Keycloak access tokens for the declaration scorer
@@ -79,7 +81,10 @@ func NewKeycloakTokenSource(config KeycloakTokenSourceConfig) (*KeycloakTokenSou
 	return &KeycloakTokenSource{
 		config: config,
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			// otelhttp transport: token fetches become CLIENT spans (no-op
+			// when telemetry is disabled).
+			Transport: otelhttp.NewTransport(http.DefaultTransport),
+			Timeout:   10 * time.Second,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return errors.New("token endpoint redirects are not permitted")
 			},
@@ -96,6 +101,10 @@ func (source *KeycloakTokenSource) Token(ctx context.Context) (string, error) {
 	if source.token != "" && source.now().Before(source.refreshAt) {
 		return source.token, nil
 	}
+	// client_credentials fetch span: a cache miss is a Keycloak round-trip
+	// and lands as a child of the first scoring call that needed the token.
+	ctx, span := tracer().Start(ctx, "keycloak.client_credentials.fetch")
+	defer span.End()
 	form := url.Values{
 		"grant_type":    {"client_credentials"},
 		"client_id":     {source.config.ClientID},

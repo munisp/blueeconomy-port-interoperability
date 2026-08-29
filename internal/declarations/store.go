@@ -15,7 +15,17 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantdb"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// tracer returns the declarations tracer. With telemetry disabled the global
+// provider is a no-op: spans are non-recording and the fail-closed scoring
+// semantics are unchanged.
+func tracer() trace.Tracer {
+	return otel.Tracer("github.com/munisp/blueeconomy-port-interoperability/internal/declarations")
+}
 
 // Store is the tenant-scoped declaration repository. Every method runs inside
 // tenantdb.WithTx so the RLS policies isolate tenants; lifecycle events are
@@ -453,7 +463,21 @@ func (store *Store) AssessRisk(ctx context.Context, declarationID string, expect
 	// trusted (fail closed: unverifiable claims earn no discount and no
 	// auto-clearance — see ApplyAEOClaimGuard).
 	verifiedAEO := store.resolveAEO(ctx, snapshot.TraderID)
-	verdict, scoreErr := scorer.Score(ctx, ScoreRequest{
+	// Scoring span linked to the declaration lifecycle trace: the server
+	// span driving SUBMITTED → RISK_ASSESSED is the lifecycle parent; the
+	// explicit link records the association even across context boundaries.
+	lifecycleContext := trace.SpanContextFromContext(ctx)
+	scoreOptions := []trace.SpanStartOption{
+		trace.WithAttributes(
+			attribute.String("declarations.declaration_id", declarationID),
+			attribute.String("declarations.declaration_ref", snapshot.DeclarationRef),
+		),
+	}
+	if lifecycleContext.IsValid() {
+		scoreOptions = append(scoreOptions, trace.WithLinks(trace.Link{SpanContext: lifecycleContext}))
+	}
+	scoreCtx, scoreSpan := tracer().Start(ctx, "declarations.assess_risk.score", scoreOptions...)
+	verdict, scoreErr := scorer.Score(scoreCtx, ScoreRequest{
 		DeclarationRef:       snapshot.DeclarationRef,
 		DeclarationType:      string(snapshot.DeclarationType),
 		HSCode:               snapshot.HSCode,
@@ -470,6 +494,17 @@ func (store *Store) AssessRisk(ctx context.Context, declarationID string, expect
 		TraderID:             snapshot.TraderID,
 		IsAEO:                verifiedAEO,
 	})
+	if scoreErr != nil {
+		scoreSpan.RecordError(scoreErr)
+		scoreSpan.SetAttributes(attribute.String("declarations.scoring.outcome", "unavailable"))
+	} else {
+		scoreSpan.SetAttributes(
+			attribute.String("declarations.scoring.outcome", "scored"),
+			attribute.Int("declarations.scoring.score", verdict.Score),
+			attribute.Bool("declarations.scoring.sanctioned", verdict.Sanctioned),
+		)
+	}
+	scoreSpan.End()
 	var assessed Declaration
 	err = store.withTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
 		declaration, err := store.getForUpdate(ctx, tx, declarationID)

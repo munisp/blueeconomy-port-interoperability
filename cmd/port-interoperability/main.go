@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/declarations"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
@@ -24,6 +23,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/server"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/telemetry"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
 
@@ -159,7 +159,33 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	pool, err := pgxpool.New(ctx, databaseURL)
+
+	// Telemetry (OTEL_DESIGN §2 Go row): OTEL_EXPORTER_OTLP_ENDPOINT unset
+	// means tracing is DISABLED and the service boots and serves exactly as
+	// before; when set, export is async/batched and collector-down is
+	// drop-with-metric (telemetry_dropped_total), never a request failure.
+	telemetryConfig, err := telemetry.LoadConfig("blueeconomy-port-interoperability")
+	if err != nil {
+		return fmt.Errorf("load telemetry config: %w", err)
+	}
+	telemetryPipeline, err := telemetry.Setup(ctx, telemetryConfig)
+	if err != nil {
+		return fmt.Errorf("setup telemetry: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), telemetry.ShutdownFlushTimeout)
+		defer cancel()
+		if err := telemetryPipeline.Shutdown(shutdownCtx); err != nil {
+			log.Printf("telemetry shutdown: %v", err)
+		}
+	}()
+	if telemetryPipeline.Enabled() {
+		log.Printf("telemetry: OTLP export enabled (endpoint=%s)", telemetryConfig.Endpoint)
+	} else {
+		log.Printf("telemetry: tracing disabled (OTEL_EXPORTER_OTLP_ENDPOINT not set); no-op tracer active")
+	}
+
+	pool, err := telemetry.NewPGXPool(ctx, databaseURL)
 	if err != nil {
 		return fmt.Errorf("open postgres: %w", err)
 	}
@@ -214,8 +240,10 @@ func run() error {
 		return fmt.Errorf("build server: %w", err)
 	}
 	httpServer := &http.Server{
-		Addr:              ":" + port,
-		Handler:           handler,
+		Addr: ":" + port,
+		// otelhttp server middleware: traceparent/baggage extraction,
+		// route-pattern span names, tenant.id/agency baggage → attributes.
+		Handler:           telemetryPipeline.Middleware(handler),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,

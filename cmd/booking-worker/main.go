@@ -23,7 +23,10 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/ledger"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/telemetry"
+	temporalotel "go.temporal.io/sdk/contrib/opentelemetry"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 )
 
@@ -72,7 +75,26 @@ func run() error {
 	defer settlement.Close()
 
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
+	// Telemetry: disabled without OTEL_EXPORTER_OTLP_ENDPOINT (boot
+	// unaffected); enabled export is async/batched, collector-down is
+	// drop-with-metric, never a worker failure.
+	telemetryConfig, err := telemetry.LoadConfig("blueeconomy-port-interoperability")
+	if err != nil {
+		return fmt.Errorf("load telemetry config: %w", err)
+	}
+	telemetryPipeline, err := telemetry.Setup(ctx, telemetryConfig)
+	if err != nil {
+		return fmt.Errorf("setup telemetry: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), telemetry.ShutdownFlushTimeout)
+		defer cancel()
+		if err := telemetryPipeline.Shutdown(shutdownCtx); err != nil {
+			log.Printf("telemetry shutdown: %v", err)
+		}
+	}()
+
+	pool, err := telemetry.NewPGXPool(ctx, databaseURL)
 	if err != nil {
 		return fmt.Errorf("open postgres: %w", err)
 	}
@@ -126,7 +148,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	temporalClient, err := client.Dial(client.Options{HostPort: address, Namespace: namespace})
+	// Temporal OTel interceptors: workflow/activity spans join the service
+	// trace and inbound workflow calls extract the caller's context
+	// (OTEL_DESIGN §3 Temporal row); no-op spans when telemetry is disabled.
+	tracingInterceptor, err := temporalotel.NewTracingInterceptor(temporalotel.TracerOptions{})
+	if err != nil {
+		return fmt.Errorf("build temporal tracing interceptor: %w", err)
+	}
+	temporalClient, err := client.Dial(client.Options{
+		HostPort:     address,
+		Namespace:    namespace,
+		Interceptors: []interceptor.ClientInterceptor{tracingInterceptor},
+	})
 	if err != nil {
 		return fmt.Errorf("dial temporal: %w", err)
 	}
@@ -137,7 +170,9 @@ func run() error {
 	}
 	defer callUps.Close()
 
-	bookingWorker := worker.New(temporalClient, taskQueue, worker.Options{})
+	bookingWorker := worker.New(temporalClient, taskQueue, worker.Options{
+		Interceptors: []interceptor.WorkerInterceptor{tracingInterceptor},
+	})
 	bookingWorker.RegisterWorkflow(booking.ECallUpBookingWorkflow)
 	bookingWorker.RegisterWorkflow(queue.ECallUpCallUpWorkflow)
 	bookingWorker.RegisterActivity(activities)

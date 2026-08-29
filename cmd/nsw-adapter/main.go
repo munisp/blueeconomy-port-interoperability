@@ -18,9 +18,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/nswadapter"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/telemetry"
 )
 
 func main() {
@@ -88,7 +88,27 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	pool, err := pgxpool.New(ctx, databaseURL)
+
+	// Telemetry: disabled without OTEL_EXPORTER_OTLP_ENDPOINT (boot
+	// unaffected); enabled export is async/batched and collector-down is
+	// drop-with-metric, never a delivery failure.
+	telemetryConfig, err := telemetry.LoadConfig("blueeconomy-port-interoperability")
+	if err != nil {
+		return fmt.Errorf("load telemetry config: %w", err)
+	}
+	telemetryPipeline, err := telemetry.Setup(ctx, telemetryConfig)
+	if err != nil {
+		return fmt.Errorf("setup telemetry: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), telemetry.ShutdownFlushTimeout)
+		defer cancel()
+		if err := telemetryPipeline.Shutdown(shutdownCtx); err != nil {
+			log.Printf("telemetry shutdown: %v", err)
+		}
+	}()
+
+	pool, err := telemetry.NewPGXPool(ctx, databaseURL)
 	if err != nil {
 		return fmt.Errorf("open postgres: %w", err)
 	}
