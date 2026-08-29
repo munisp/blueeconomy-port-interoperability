@@ -101,6 +101,13 @@ func (env sweeperEnv) seedQueuedRequest(t *testing.T, bound context.Context, key
 	if err := env.store.ConfigureTerminal(bound, terminalID, 1); err != nil {
 		t.Fatalf("set queue capacity: %v", err)
 	}
+	return env.seedQueuedRequestOn(t, bound, terminalID, key)
+}
+
+// seedQueuedRequestOn enqueues one request on an existing terminal of the
+// tenant bound to ctx.
+func (env sweeperEnv) seedQueuedRequestOn(t *testing.T, bound context.Context, terminalID, key string) Request {
+	t.Helper()
 	request, err := env.store.Create(bound, CreateRequest{
 		IdempotencyKey: key,
 		TruckPlate:     "LAG-222-BB",
@@ -303,7 +310,17 @@ func TestSweeperExpiresStaleQueuedEntries(t *testing.T) {
 	tenantID := fmt.Sprintf("tenant-stale-%d", time.Now().UnixNano()%1_000_000)
 	bound := env.addTenant(t, tenantID, true)
 	stale := env.seedQueuedRequest(t, bound, "stale-entry-1")
-	fresh := env.seedQueuedRequest(t, bound, "fresh-entry-1")
+	// The sweep backfills free call-up capacity into the queue head (see
+	// TestSweeperSweepsEveryActiveTenant), so two terminals are used: the
+	// stale head waits on a terminal whose single slot is FREE — it must be
+	// expired before any promotion can call it up — while the fresh entry
+	// queues behind an occupant already holding its terminal's single slot,
+	// so the backfill correctly leaves it queued.
+	occupant := env.seedQueuedRequest(t, bound, "occupant-entry-1")
+	fresh := env.seedQueuedRequestOn(t, bound, occupant.TerminalID, "fresh-entry-1")
+	if _, err := env.store.PromoteNext(bound, occupant.TerminalID, Principal{ID: "test-trucker", Role: "trucker"}); err != nil {
+		t.Fatalf("promote occupant into the terminal slot: %v", err)
+	}
 	if _, err := env.pool.Exec(env.ctx,
 		`UPDATE truck_queue_requests SET created_at = now() - interval '2 hours' WHERE queue_request_id=$1`,
 		stale.QueueRequestID); err != nil {

@@ -573,7 +573,7 @@ func (store *Store) ExpireStale(ctx context.Context, createdBefore time.Time, pr
 	count := 0
 	err := store.withTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
 		rows, err := tx.Query(ctx, `SELECT `+queueColumns+` FROM truck_queue_requests
-			WHERE status='QUEUED' AND created_at < $1 FOR UPDATE SKIP LOCKED`, createdBefore.UTC())
+			WHERE tenant_id=$2 AND status='QUEUED' AND created_at < $1 FOR UPDATE SKIP LOCKED`, createdBefore.UTC(), claims.TenantID)
 		if err != nil {
 			return fmt.Errorf("find stale queued requests: %w", err)
 		}
@@ -741,16 +741,18 @@ func (store *Store) ListTerminal(ctx context.Context, terminalID string) ([]Requ
 	return requests, err
 }
 
-// ListActiveCallUps returns every request currently holding call-up capacity
-// (CALLED_UP or EN_ROUTE). The sweeper uses it to idempotently ensure each
-// active call-up has a running grace-window workflow.
+// ListActiveCallUps returns every request of the bound tenant currently
+// holding call-up capacity (CALLED_UP or EN_ROUTE). The sweeper uses it to
+// idempotently ensure each active call-up has a running grace-window
+// workflow. The tenant filter is explicit defence-in-depth alongside RLS:
+// the sweeper must never start a workflow for another tenant's call-up.
 func (store *Store) ListActiveCallUps(ctx context.Context) ([]Request, error) {
 	var requests []Request
-	err := store.withTx(ctx, func(tx pgx.Tx, _ tenantctx.Claims) error {
+	err := store.withTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
 		rows, err := tx.Query(ctx, `
 			SELECT `+queueColumns+` FROM truck_queue_requests
-			WHERE status IN ('CALLED_UP','EN_ROUTE')
-			ORDER BY terminal_id, grace_deadline`)
+			WHERE tenant_id=$1 AND status IN ('CALLED_UP','EN_ROUTE')
+			ORDER BY terminal_id, grace_deadline`, claims.TenantID)
 		if err != nil {
 			return fmt.Errorf("list active call-ups: %w", err)
 		}
@@ -776,7 +778,7 @@ func (store *Store) ReconcileCallUps(ctx context.Context, principal Principal) (
 	var promotedAll []Request
 	err := store.withTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
 		rows, err := tx.Query(ctx, `SELECT `+queueColumns+` FROM truck_queue_requests
-			WHERE status IN ('CALLED_UP','EN_ROUTE') AND grace_deadline < $1 FOR UPDATE SKIP LOCKED`, now)
+			WHERE tenant_id=$2 AND status IN ('CALLED_UP','EN_ROUTE') AND grace_deadline < $1 FOR UPDATE SKIP LOCKED`, now, claims.TenantID)
 		if err != nil {
 			return fmt.Errorf("find forfeitable call-ups: %w", err)
 		}
@@ -802,7 +804,7 @@ func (store *Store) ReconcileCallUps(ctx context.Context, principal Principal) (
 				promotedAll = append(promotedAll, *promoted)
 			}
 		}
-		terminals, err := tx.Query(ctx, `SELECT DISTINCT terminal_id FROM truck_queue_requests WHERE status='QUEUED'`)
+		terminals, err := tx.Query(ctx, `SELECT DISTINCT terminal_id FROM truck_queue_requests WHERE tenant_id=$1 AND status='QUEUED'`, claims.TenantID)
 		if err != nil {
 			return fmt.Errorf("find queued terminals: %w", err)
 		}

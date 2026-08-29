@@ -106,14 +106,15 @@ func (sweeper *Sweeper) sweepTenant(ctx context.Context, tenantID string) error 
 	if err != nil {
 		return fmt.Errorf("bind tenant claims: %w", err)
 	}
-	if _, err := sweeper.store.ReconcileCallUps(bound, principal); err != nil {
-		return fmt.Errorf("reconcile call-ups: %w", err)
-	}
-	// Retire queue entries that waited past the stale cutoff: a QUEUED entry
-	// never held call-up capacity, but leaving it forever parks the waiting
-	// list and misleads position reporting.
+	// Retire queue entries that waited past the stale cutoff BEFORE any
+	// call-up promotion runs: a stale head-of-queue must expire, never be
+	// called up. A QUEUED entry never held call-up capacity, but leaving it
+	// forever parks the waiting list and misleads position reporting.
 	if _, err := sweeper.store.ExpireStale(bound, time.Now().Add(-sweeper.staleAfter), principal); err != nil {
 		return fmt.Errorf("expire stale queue entries: %w", err)
+	}
+	if _, err := sweeper.store.ReconcileCallUps(bound, principal); err != nil {
+		return fmt.Errorf("reconcile call-ups: %w", err)
 	}
 	active, err := sweeper.store.ListActiveCallUps(bound)
 	if err != nil {
