@@ -176,13 +176,18 @@ func (verifier *JWKSVerifier) key(kid string) (*rsa.PublicKey, error) {
 	return key, nil
 }
 
-// jwksClaims mirrors Claims but tolerates Keycloak's string-or-array aud.
+// jwksClaims mirrors Claims but tolerates Keycloak's string-or-array aud and
+// its realm_access role nesting.
 type jwksClaims struct {
-	Issuer   string          `json:"iss"`
-	Audience json.RawMessage `json:"aud"`
-	TenantID string          `json:"tenant_id"`
-	Subject  string          `json:"sub"`
-	Expires  json.Number     `json:"exp"`
+	Issuer      string          `json:"iss"`
+	Audience    json.RawMessage `json:"aud"`
+	TenantID    string          `json:"tenant_id"`
+	Subject     string          `json:"sub"`
+	Expires     json.Number     `json:"exp"`
+	Roles       []string        `json:"roles"`
+	RealmAccess struct {
+		Roles []string `json:"roles"`
+	} `json:"realm_access"`
 }
 
 func audienceContains(raw json.RawMessage, audience string) bool {
@@ -258,5 +263,6 @@ func (verifier *JWKSVerifier) Verify(token string) (Claims, error) {
 		TenantID: parsed.TenantID,
 		Subject:  parsed.Subject,
 		Expires:  expires,
+		Roles:    sanitizeRoles(append(parsed.Roles, parsed.RealmAccess.Roles...)),
 	}, nil
 }

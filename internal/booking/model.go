@@ -44,6 +44,10 @@ var (
 	ErrSlotWindow          = errors.New("slot time window is not valid for this operation")
 	ErrGateDenied          = errors.New("gate scan does not satisfy booking, slot and payment checks")
 	ErrPaymentInvalid      = errors.New("payment intent or confirmation is not valid for this booking")
+	// ErrPaymentReceiptReuse means the switch receipt reference is already
+	// bound to a different booking (pay-once-board-many attempt). The
+	// DB-enforced unique index backs this error.
+	ErrPaymentReceiptReuse = errors.New("payment receipt reference is already bound to another booking")
 )
 
 // transitions is the complete fail-closed booking state machine. Any pair not

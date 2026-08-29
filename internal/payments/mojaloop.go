@@ -30,8 +30,33 @@ type Receipt struct {
 	AcceptedAt time.Time `json:"accepted_at"`
 }
 
+// TransferStateCommitted is the only switch transfer state that settles a
+// payment; every other state fails verification closed.
+const TransferStateCommitted = "COMMITTED"
+
+// TransferStatus is the switch-side settlement state of one transaction,
+// queried by tx_ref before any booking is marked paid.
+type TransferStatus struct {
+	TxRef      string `json:"tx_ref"`
+	State      string `json:"state"`
+	AmountKobo int64  `json:"amount_kobo"`
+	Currency   string `json:"currency"`
+	Fulfilment string `json:"fulfilment"`
+}
+
+// ErrPaymentUnverified means the switch answered but the transfer is not a
+// settled payment for the expected amount (wrong state, wrong amount, wrong
+// currency or a mismatched tx_ref). It is not transient: the caller must
+// reject the confirmation, not retry.
+var ErrPaymentUnverified = errors.New("payment is not settled at the switch for the expected amount")
+
 type Gateway interface {
 	RequestPayment(ctx context.Context, intent Intent) (Receipt, error)
+	// VerifyPayment queries the switch for the settlement state of txRef and
+	// fails closed: an unreachable switch or an unreadable answer is an
+	// error, and any state other than a committed transfer for exactly
+	// expectedAmountKobo NGN is ErrPaymentUnverified.
+	VerifyPayment(ctx context.Context, txRef string, expectedAmountKobo int64) (TransferStatus, error)
 }
 
 type MojaloopGateway struct {
@@ -136,4 +161,109 @@ func (gateway *MojaloopGateway) RequestPayment(ctx context.Context, intent Inten
 		return Receipt{}, errors.New("mojaloop returned a mismatched transaction reference")
 	}
 	return Receipt{TxRef: txRef, AcceptedAt: time.Now().UTC()}, nil
+}
+
+// parseNairaMinor converts an NGN major-unit decimal string ("123.45") into
+// integer kobo. Anything that is not a well-formed non-negative NGN amount is
+// rejected — money never passes through floats.
+func parseNairaMinor(value string) (int64, error) {
+	if value == "" || len(value) > 20 {
+		return 0, errors.New("amount is missing or too long")
+	}
+	naira, kobo, _ := strings.Cut(value, ".")
+	if naira == "" {
+		return 0, errors.New("amount is malformed")
+	}
+	for _, digit := range naira {
+		if digit < '0' || digit > '9' {
+			return 0, errors.New("amount contains non-numeric characters")
+		}
+	}
+	var whole, fraction int64
+	if _, err := fmt.Sscanf(naira, "%d", &whole); err != nil {
+		return 0, errors.New("amount is malformed")
+	}
+	switch len(kobo) {
+	case 0:
+	case 1:
+		fraction = int64(kobo[0]-'0') * 10
+	case 2:
+		fraction = int64(kobo[0]-'0')*10 + int64(kobo[1]-'0')
+	default:
+		return 0, errors.New("amount carries sub-kobo precision")
+	}
+	if kobo != "" {
+		for _, digit := range kobo {
+			if digit < '0' || digit > '9' {
+				return 0, errors.New("amount contains non-numeric characters")
+			}
+		}
+	}
+	return whole*100 + fraction, nil
+}
+
+// VerifyPayment queries the switch transfer resource for txRef and fails
+// closed unless the transfer is COMMITTED for exactly expectedAmountKobo NGN
+// with a fulfilment present. A switch outage, non-200 status, undecodable or
+// self-contradicting answer is always an error — never a verified payment.
+func (gateway *MojaloopGateway) VerifyPayment(ctx context.Context, txRef string, expectedAmountKobo int64) (TransferStatus, error) {
+	if txRef == "" || len(txRef) > 128 || expectedAmountKobo <= 0 {
+		return TransferStatus{}, ErrPaymentUnverified
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, gateway.baseURL+"/transfers/"+txRef, nil)
+	if err != nil {
+		return TransferStatus{}, err
+	}
+	request.Header.Set("Accept", "application/vnd.interoperability.transfers+json;version=1.0")
+	request.Header.Set("FSPIOP-Source", "ecallup-dfsp")
+	request.Header.Set("FSPIOP-Destination", "npa-switch")
+	request.Header.Set("Date", time.Now().UTC().Format(http.TimeFormat))
+	request.Header.Set("Authorization", "Bearer "+gateway.token)
+	response, err := gateway.client.Do(request)
+	if err != nil {
+		return TransferStatus{}, fmt.Errorf("mojaloop transfer status query: %w", err)
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return TransferStatus{}, fmt.Errorf("read mojaloop transfer status: %w", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		return TransferStatus{}, fmt.Errorf("mojaloop transfer status query failed: status %d", response.StatusCode)
+	}
+	var decoded struct {
+		TransferID    string `json:"transferId"`
+		TransferState string `json:"transferState"`
+		Fulfilment    string `json:"fulfilment"`
+		Amount        *struct {
+			Amount   string `json:"amount"`
+			Currency string `json:"currency"`
+		} `json:"amount"`
+	}
+	if err := json.Unmarshal(responseBody, &decoded); err != nil {
+		return TransferStatus{}, fmt.Errorf("decode mojaloop transfer status: %w", err)
+	}
+	if decoded.TransferState != TransferStateCommitted || strings.TrimSpace(decoded.Fulfilment) == "" {
+		return TransferStatus{}, ErrPaymentUnverified
+	}
+	if decoded.TransferID != "" && decoded.TransferID != txRef {
+		return TransferStatus{}, ErrPaymentUnverified
+	}
+	if decoded.Amount == nil {
+		return TransferStatus{}, fmt.Errorf("mojaloop transfer status carries no amount; refusing to verify")
+	}
+	amountKobo, err := parseNairaMinor(decoded.Amount.Amount)
+	if err != nil || decoded.Amount.Currency != "NGN" {
+		return TransferStatus{}, fmt.Errorf("mojaloop transfer amount is unreadable; refusing to verify")
+	}
+	if amountKobo != expectedAmountKobo {
+		return TransferStatus{}, ErrPaymentUnverified
+	}
+	return TransferStatus{
+		TxRef:      txRef,
+		State:      decoded.TransferState,
+		AmountKobo: amountKobo,
+		Currency:   decoded.Amount.Currency,
+		Fulfilment: decoded.Fulfilment,
+	}, nil
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/customs"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
@@ -585,8 +586,44 @@ func scanPaymentIntent(row pgx.Row, intent *PaymentIntent) error {
 	return row.Scan(&intent.IntentID, &intent.BookingID, &intent.RequestID, &intent.AmountKobo, &intent.Currency, &intent.MojaloopTxRef, &intent.Status, &intent.CreatedAt)
 }
 
+// PendingPaymentIntent loads the REQUESTED payment intent of a booking. It is
+// the handle the confirmation path verifies against the payment switch: the
+// mojaloop_tx_ref was issued by the switch at intent creation, so it — and
+// only it — is a verifiable receipt reference for the booking.
+func (store *Store) PendingPaymentIntent(ctx context.Context, bookingID string) (PaymentIntent, error) {
+	var intent PaymentIntent
+	err := store.withTx(ctx, func(tx pgx.Tx, _ tenantctx.Claims) error {
+		err := scanPaymentIntent(tx.QueryRow(ctx, `
+			SELECT intent_id, booking_id, request_id, amount_kobo, currency, mojaloop_tx_ref, status, created_at
+			FROM booking_payment_intents
+			WHERE booking_id=$1 AND status='REQUESTED'
+			ORDER BY created_at DESC LIMIT 1`, bookingID), &intent)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrPaymentInvalid
+		}
+		if err != nil {
+			return fmt.Errorf("load pending payment intent: %w", err)
+		}
+		return nil
+	})
+	return intent, err
+}
+
+// isReceiptReuseConflict reports whether err is the DB unique-violation of
+// the payment_receipt_ref partial unique index (pay-once-board-many guard).
+func isReceiptReuseConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "truck_bookings_payment_receipt_ref_uniq"
+}
+
 // ConfirmPayment moves SLOT_RESERVED -> PAID against a Mojaloop receipt
-// reference produced by the payment switch.
+// reference produced by the payment switch. The reference must be the exact
+// mojaloop_tx_ref of the booking's REQUESTED intent — the value issued by the
+// switch at RequestPayment — so a caller-invented reference can never pay a
+// booking. The caller must additionally have verified the transfer as
+// COMMITTED at the switch (payments.Gateway.VerifyPayment); the store binds
+// the receipt to the intent and lets the unique index reject any attempt to
+// reuse one receipt across bookings.
 func (store *Store) ConfirmPayment(ctx context.Context, bookingID, receiptRef string, expectedVersion int64, principal Principal) (Booking, error) {
 	if receiptRef == "" || len(receiptRef) > 128 {
 		return Booking{}, ErrPaymentInvalid
@@ -597,20 +634,30 @@ func (store *Store) ConfirmPayment(ctx context.Context, bookingID, receiptRef st
 		if err != nil {
 			return err
 		}
+		// Idempotent replay: the same receipt already paid this booking (e.g.
+		// the caller retried after a workflow-signal failure). Returning the
+		// paid booking is safe; it is the cross-booking reuse the unique
+		// index and the intent binding below reject.
+		if booking.Status == StatusPaid && booking.PaymentReceiptRef != nil && *booking.PaymentReceiptRef == receiptRef {
+			paid = booking
+			return nil
+		}
 		if booking.Version != expectedVersion {
 			return ErrOptimisticConflict
 		}
 		if booking.Status != StatusSlotReserved {
 			return ErrInvalidTransition
 		}
-		var pendingIntents int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM booking_payment_intents WHERE booking_id=$1 AND status='REQUESTED'`, bookingID).Scan(&pendingIntents); err != nil {
+		var matchingIntents int
+		if err := tx.QueryRow(ctx, `
+			SELECT count(*) FROM booking_payment_intents
+			WHERE booking_id=$1 AND status='REQUESTED' AND mojaloop_tx_ref=$2`, bookingID, receiptRef).Scan(&matchingIntents); err != nil {
 			return fmt.Errorf("check payment intents: %w", err)
 		}
-		if pendingIntents == 0 {
+		if matchingIntents == 0 {
 			return ErrPaymentInvalid
 		}
-		if _, err := tx.Exec(ctx, `UPDATE booking_payment_intents SET status='COMPLETED' WHERE booking_id=$1 AND status='REQUESTED'`, bookingID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE booking_payment_intents SET status='COMPLETED' WHERE booking_id=$1 AND status='REQUESTED' AND mojaloop_tx_ref=$2`, bookingID, receiptRef); err != nil {
 			return fmt.Errorf("complete payment intents: %w", err)
 		}
 		result, err := store.transitionTx(ctx, tx, claims, booking, StatusPaid, func(updated *Booking) {
@@ -620,6 +667,9 @@ func (store *Store) ConfirmPayment(ctx context.Context, bookingID, receiptRef st
 			"amount-kobo":         fmt.Sprintf("%d", booking.AmountKobo),
 		}, principal, "")
 		if err != nil {
+			if isReceiptReuseConflict(err) {
+				return ErrPaymentReceiptReuse
+			}
 			return err
 		}
 		paid = result

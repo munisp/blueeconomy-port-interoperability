@@ -49,6 +49,9 @@ type fakePayments struct{}
 func (fakePayments) RequestPayment(context.Context, payments.Intent) (payments.Receipt, error) {
 	return payments.Receipt{}, nil
 }
+func (fakePayments) VerifyPayment(_ context.Context, txRef string, expectedAmountKobo int64) (payments.TransferStatus, error) {
+	return payments.TransferStatus{TxRef: txRef, State: payments.TransferStateCommitted, AmountKobo: expectedAmountKobo, Currency: "NGN"}, nil
+}
 
 type fakeOrchestrator struct{}
 

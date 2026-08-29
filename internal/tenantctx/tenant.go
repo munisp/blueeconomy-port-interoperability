@@ -20,6 +20,60 @@ type Claims struct {
 	TenantID string `json:"tenant_id"`
 	Subject  string `json:"sub"`
 	Expires  int64  `json:"exp"`
+	// Roles are the verified platform PBAC roles carried by the token. They
+	// are only ever populated from a verified token payload — never from
+	// request bodies or headers.
+	Roles []string `json:"roles,omitempty"`
+}
+
+// HasRole reports whether the verified claims carry the given platform role.
+func (claims Claims) HasRole(role string) bool {
+	for _, held := range claims.Roles {
+		if held == role {
+			return true
+		}
+	}
+	return false
+}
+
+// HasAnyRole reports whether the verified claims carry at least one of the
+// given platform roles.
+func (claims Claims) HasAnyRole(roles ...string) bool {
+	for _, role := range roles {
+		if claims.HasRole(role) {
+			return true
+		}
+	}
+	return false
+}
+
+// validRole restricts role strings to canonical platform role names.
+func validRole(value string) bool {
+	if len(value) < 2 || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-') {
+			return false
+		}
+	}
+	return value[0] >= 'a' && value[0] <= 'z'
+}
+
+// sanitizeRoles drops malformed role entries and deduplicates; a token
+// carrying only malformed roles verifies with zero roles (fail closed: every
+// role-gated route then denies).
+func sanitizeRoles(roles []string) []string {
+	var clean []string
+	seen := map[string]bool{}
+	for _, role := range roles {
+		if !validRole(role) || seen[role] {
+			continue
+		}
+		seen[role] = true
+		clean = append(clean, role)
+	}
+	return clean
 }
 
 type Verifier struct {
@@ -111,6 +165,7 @@ func (verifier Verifier) Verify(token string) (Claims, error) {
 	if json.Unmarshal(payloadJSON, &claims) != nil || !validTenantID(claims.TenantID) || claims.Subject == "" || claims.Issuer != verifier.Issuer || claims.Audience != verifier.Audience {
 		return Claims{}, errors.New("gateway tenant claims rejected")
 	}
+	claims.Roles = sanitizeRoles(claims.Roles)
 	now := time.Now
 	if verifier.Now != nil {
 		now = verifier.Now

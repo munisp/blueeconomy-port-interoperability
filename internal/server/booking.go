@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -263,7 +264,18 @@ func (server *Server) createPaymentIntent(response http.ResponseWriter, request 
 	writeJSON(response, http.StatusCreated, intent)
 }
 
+// confirmPayment is the settlement confirmation boundary. It is bound to the
+// verified payment-switch role — a tenant user can never confirm their own
+// booking — and it never trusts the caller's receipt reference: the reference
+// must equal the mojaloop_tx_ref issued by the switch at intent creation, and
+// the switch itself must report the transfer COMMITTED for the exact intent
+// amount. A switch outage fails closed as 503 UNVERIFIED; nothing is marked
+// paid on an unverifiable confirmation.
 func (server *Server) confirmPayment(response http.ResponseWriter, request *http.Request, bookingID string) {
+	claims, ok := requireRole(response, request, RolePaymentSwitch)
+	if !ok {
+		return
+	}
 	var input struct {
 		ReceiptRef      string `json:"receipt_ref"`
 		ExpectedVersion int64  `json:"expected_version"`
@@ -274,12 +286,30 @@ func (server *Server) confirmPayment(response http.ResponseWriter, request *http
 		writeError(response, http.StatusBadRequest, "receipt_ref and positive expected_version are required")
 		return
 	}
-	paid, err := server.bookings.ConfirmPayment(request.Context(), bookingID, input.ReceiptRef, input.ExpectedVersion, principalOf(request, "payment-switch"))
+	intent, err := server.bookings.PendingPaymentIntent(request.Context(), bookingID)
 	if err != nil {
 		writeBookingError(response, err)
 		return
 	}
-	if err := server.orchestrator.SignalPaymentConfirmed(request.Context(), bookingID, input.ReceiptRef); err != nil {
+	if intent.MojaloopTxRef != input.ReceiptRef {
+		writeError(response, http.StatusUnprocessableEntity, "receipt_ref does not match the switch-issued transaction reference of this booking")
+		return
+	}
+	status, err := server.payments.VerifyPayment(request.Context(), intent.MojaloopTxRef, intent.AmountKobo)
+	if errors.Is(err, payments.ErrPaymentUnverified) {
+		writeError(response, http.StatusUnprocessableEntity, "payment is not settled at the switch for the expected amount")
+		return
+	}
+	if err != nil {
+		writeError(response, http.StatusServiceUnavailable, "payment switch verification unavailable; confirmation UNVERIFIED")
+		return
+	}
+	paid, err := server.bookings.ConfirmPayment(request.Context(), bookingID, status.TxRef, input.ExpectedVersion, booking.Principal{ID: claims.Subject, Role: RolePaymentSwitch})
+	if err != nil {
+		writeBookingError(response, err)
+		return
+	}
+	if err := server.orchestrator.SignalPaymentConfirmed(request.Context(), bookingID, status.TxRef); err != nil {
 		writeJSON(response, http.StatusBadGateway, map[string]string{
 			"error":      "payment recorded but workflow signal failed; retry this confirmation",
 			"booking_id": bookingID,
