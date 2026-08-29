@@ -120,6 +120,27 @@ func AssignRiskLane(input RiskInput) (RiskAssessment, error) {
 	return assessment, nil
 }
 
+// ReasonAEOUnverified marks a lane whose trader claimed AEO status that
+// could not be verified against the accreditation registry at scoring time.
+const ReasonAEOUnverified = "AEO_UNVERIFIED: claimed AEO status is not verifiable against the accreditation registry"
+
+// ApplyAEOClaimGuard enforces the fail-closed AEO doctrine on a lane
+// assessment: a client-claimed AEO status that the accreditation registry
+// did not verify earns no discount (the assessment was computed without it)
+// and never auto-clears — a GREEN lane on an unverified claim is withheld to
+// YELLOW documentary review and the lane reason records AEO_UNVERIFIED.
+func ApplyAEOClaimGuard(assessment RiskAssessment, claimedAEO, verifiedAEO bool) RiskAssessment {
+	if !claimedAEO || verifiedAEO {
+		return assessment
+	}
+	assessment.Reasons = append(assessment.Reasons, ReasonAEOUnverified)
+	if assessment.Lane == LaneGreen {
+		assessment.Lane = LaneYellow
+		assessment.Reasons = append(assessment.Reasons, "auto-clearance withheld: AEO status unverified — documentary review required")
+	}
+	return assessment
+}
+
 // ─── Duty Calculation (CIF-based, integer minor units) ──────────────────────
 
 // DutyInput is the CIF duty computation input: integer minor amounts and

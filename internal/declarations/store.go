@@ -23,6 +23,35 @@ import (
 type Store struct {
 	pool   *pgxpool.Pool
 	signer *events.Signer
+	// aeoRegistry resolves accredited AEO status server-side at scoring
+	// time; nil means no registry integration and every AEO claim fails
+	// closed (no discount, no auto-clearance).
+	aeoRegistry AEORegistry
+}
+
+// AEORegistry is the accreditation source for Authorized Economic Operator
+// status. AEO is a customs-granted privilege: it is resolved server-side
+// from the registry, never trusted from client request fields.
+type AEORegistry interface {
+	IsAEO(ctx context.Context, traderID string) (bool, error)
+}
+
+// SetAEORegistry wires the accreditation source consulted at scoring time.
+func (store *Store) SetAEORegistry(registry AEORegistry) {
+	store.aeoRegistry = registry
+}
+
+// resolveAEO verifies a trader's AEO accreditation. Any doubt — no registry
+// wired, or a registry error — resolves to unverified (fail closed).
+func (store *Store) resolveAEO(ctx context.Context, traderID string) bool {
+	if store.aeoRegistry == nil {
+		return false
+	}
+	verified, err := store.aeoRegistry.IsAEO(ctx, traderID)
+	if err != nil {
+		return false
+	}
+	return verified
 }
 
 // NewStore builds the declaration store. The envelope signer is mandatory:
@@ -399,6 +428,11 @@ func (store *Store) AssessRisk(ctx context.Context, declarationID string, expect
 	if err != nil {
 		return Declaration{}, err
 	}
+	// AEO status is resolved server-side from the accreditation registry at
+	// scoring time; the client-supplied claim on the declaration is never
+	// trusted (fail closed: unverifiable claims earn no discount and no
+	// auto-clearance — see ApplyAEOClaimGuard).
+	verifiedAEO := store.resolveAEO(ctx, snapshot.TraderID)
 	verdict, scoreErr := scorer.Score(ctx, ScoreRequest{
 		DeclarationRef:       snapshot.DeclarationRef,
 		DeclarationType:      string(snapshot.DeclarationType),
@@ -414,7 +448,7 @@ func (store *Store) AssessRisk(ctx context.Context, declarationID string, expect
 		ConsigneeID:          snapshot.ConsigneeID,
 		OperatorID:           snapshot.OperatorID,
 		TraderID:             snapshot.TraderID,
-		IsAEO:                snapshot.IsAEO,
+		IsAEO:                verifiedAEO,
 	})
 	var assessed Declaration
 	err = store.withTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
@@ -453,7 +487,7 @@ func (store *Store) AssessRisk(ctx context.Context, declarationID string, expect
 		}
 		assessment, err := AssignRiskLane(RiskInput{
 			Score:                   verdict.Score,
-			IsAEO:                   declaration.IsAEO,
+			IsAEO:                   verifiedAEO,
 			IsSanctioned:            verdict.Sanctioned,
 			InvoiceAmountMinor:      declaration.InvoiceAmountMinor,
 			HighValueThresholdMinor: highValueThresholdMinor,
@@ -463,6 +497,9 @@ func (store *Store) AssessRisk(ctx context.Context, declarationID string, expect
 		if err != nil {
 			return fmt.Errorf("assign risk lane: %w", err)
 		}
+		// Fail-closed AEO: a claimed-but-unverified status earns no discount
+		// and never auto-clears; the lane reason records AEO_UNVERIFIED.
+		assessment = ApplyAEOClaimGuard(assessment, declaration.IsAEO, verifiedAEO)
 		lane := assessment.Lane
 		finalStatus := LaneStatus(lane)
 		var clearedAt *time.Time
