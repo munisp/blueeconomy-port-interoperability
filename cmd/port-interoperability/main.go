@@ -108,19 +108,37 @@ func run() error {
 		return errors.New("CALLUP_GRACE_MINUTES must be a positive integer")
 	}
 	// Declaration risk scoring is mandatory wiring: without the fail-closed
-	// scorer every submission would park in SCORING_UNAVAILABLE.
+	// scorer every submission would park in SCORING_UNAVAILABLE. Phase-7
+	// (PRA-066..068): the scorer is called over gRPC
+	// (blueeconomy.riskscore.v1.RiskScoreService) with bounded retries and a
+	// circuit breaker. PRA-126: authentication is a Keycloak
+	// client_credentials service-account token — the static
+	// DECLARATIONS_SCORER_BEARER_TOKEN path is retired. The provisioned
+	// client must carry an audience mapper for "declaration-scorer" (the
+	// scorer's KEYCLOAK_EXPECTED_AUDIENCE contract value).
 	scorerTimeout, err := time.ParseDuration(defaultEnv("DECLARATIONS_SCORER_TIMEOUT", "10s"))
 	if err != nil || scorerTimeout <= 0 {
 		return errors.New("DECLARATIONS_SCORER_TIMEOUT must be a positive duration")
 	}
-	declarationScorer, err := declarations.NewHTTPScorer(declarations.ScorerConfig{
-		BaseURL:     requiredEnv("DECLARATIONS_SCORER_URL"),
-		BearerToken: os.Getenv("DECLARATIONS_SCORER_BEARER_TOKEN"),
+	scorerTokenSource, err := declarations.NewKeycloakTokenSource(declarations.KeycloakTokenSourceConfig{
+		TokenURL:     requiredEnv("KEYCLOAK_TOKEN_URL"),
+		ClientID:     requiredEnv("KEYCLOAK_CLIENT_ID"),
+		ClientSecret: requiredEnv("KEYCLOAK_CLIENT_SECRET"),
+	})
+	if err != nil {
+		return fmt.Errorf("configure declaration scorer authentication: %w", err)
+	}
+	declarationScorer, err := declarations.NewGRPCScorer(declarations.GRPCScorerConfig{
+		Address:     requiredEnv("DECLARATIONS_SCORER_GRPC_ADDR"),
+		CACertFile:  os.Getenv("DECLARATIONS_SCORER_CA_CERT_FILE"),
 		Timeout:     scorerTimeout,
+		MaxRetries:  -1, // platform default retry budget
+		TokenSource: scorerTokenSource,
 	})
 	if err != nil {
 		return fmt.Errorf("configure declaration risk scorer: %w", err)
 	}
+	defer declarationScorer.Close()
 	highValueMinor, err := strconv.ParseInt(defaultEnv("DECLARATIONS_HIGH_VALUE_MINOR", "0"), 10, 64)
 	if err != nil || highValueMinor < 0 {
 		return errors.New("DECLARATIONS_HIGH_VALUE_MINOR must be a non-negative integer")
