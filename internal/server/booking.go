@@ -311,7 +311,10 @@ func (server *Server) createPaymentIntent(response http.ResponseWriter, request 
 // must equal the mojaloop_tx_ref issued by the switch at intent creation, and
 // the switch itself must report the transfer COMMITTED for the exact intent
 // amount. A switch outage fails closed as 503 UNVERIFIED; nothing is marked
-// paid on an unverifiable confirmation.
+// paid on an unverifiable confirmation. Replays are first-class: a booking
+// already PAID with the caller's receipt ref is re-verified at the switch and
+// returned unchanged, so the retry after a workflow-signal failure converges
+// instead of erroring on the completed intent.
 func (server *Server) confirmPayment(response http.ResponseWriter, request *http.Request, bookingID string) {
 	claims, ok := requireRole(response, request, RolePaymentSwitch)
 	if !ok {
@@ -328,15 +331,34 @@ func (server *Server) confirmPayment(response http.ResponseWriter, request *http
 		return
 	}
 	intent, err := server.bookings.PendingPaymentIntent(request.Context(), bookingID)
-	if err != nil {
+	amountKobo := intent.AmountKobo
+	switch {
+	case errors.Is(err, booking.ErrPaymentInvalid):
+		// Idempotent replay: the intent is already COMPLETED, so the booking
+		// may already be PAID with this exact receipt — the retry this
+		// endpoint itself asks for when the workflow signal fails after the
+		// payment was recorded. Only a booking already settled with the
+		// caller's receipt ref takes this path; anything else stays refused.
+		found, getErr := server.bookings.Get(request.Context(), bookingID)
+		if getErr != nil {
+			writeBookingError(response, getErr)
+			return
+		}
+		if found.Status != booking.StatusPaid || found.PaymentReceiptRef == nil || *found.PaymentReceiptRef != input.ReceiptRef {
+			writeBookingError(response, err)
+			return
+		}
+		amountKobo = found.AmountKobo
+	case err != nil:
 		writeBookingError(response, err)
 		return
+	default:
+		if intent.MojaloopTxRef != input.ReceiptRef {
+			writeError(response, http.StatusUnprocessableEntity, "receipt_ref does not match the switch-issued transaction reference of this booking")
+			return
+		}
 	}
-	if intent.MojaloopTxRef != input.ReceiptRef {
-		writeError(response, http.StatusUnprocessableEntity, "receipt_ref does not match the switch-issued transaction reference of this booking")
-		return
-	}
-	status, err := server.payments.VerifyPayment(request.Context(), intent.MojaloopTxRef, intent.AmountKobo)
+	status, err := server.payments.VerifyPayment(request.Context(), input.ReceiptRef, amountKobo)
 	if errors.Is(err, payments.ErrPaymentUnverified) {
 		writeError(response, http.StatusUnprocessableEntity, "payment is not settled at the switch for the expected amount")
 		return
