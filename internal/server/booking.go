@@ -129,10 +129,38 @@ func (server *Server) createBooking(response http.ResponseWriter, request *http.
 	writeJSON(response, http.StatusCreated, created)
 }
 
+// bookingVisible enforces booking ownership for reads: the verified subject
+// that created the booking may read it; officer roles (gate, NPA, terminal
+// operator, payment switch) may read across subjects per the platform role
+// model. Bookings without a recorded creator (pre-migration rows) are
+// officer-readable only.
+func bookingVisible(response http.ResponseWriter, request *http.Request, found booking.Booking) bool {
+	claims, ok := claimsOf(response, request)
+	if !ok {
+		return false
+	}
+	if found.CreatedBy != nil && *found.CreatedBy == claims.Subject {
+		return true
+	}
+	if claims.HasAnyRole(RoleGateOfficer, RoleNPAOfficer, RolePortOperatorAdmin, RolePaymentSwitch) {
+		return true
+	}
+	writeError(response, http.StatusForbidden, "booking belongs to a different subject")
+	return false
+}
+
 func (server *Server) bookingRead(response http.ResponseWriter, request *http.Request) {
 	path := strings.TrimPrefix(request.URL.Path, "/v1/bookings/")
 	parts := strings.Split(path, "/")
 	if len(parts) == 2 && parts[0] != "" && parts[1] == "observer" {
+		found, err := server.bookings.Get(request.Context(), parts[0])
+		if err != nil {
+			writeBookingError(response, err)
+			return
+		}
+		if !bookingVisible(response, request, found) {
+			return
+		}
 		state, err := server.orchestrator.ObserverState(request.Context(), parts[0])
 		if err != nil {
 			writeBookingError(response, err)
@@ -148,6 +176,9 @@ func (server *Server) bookingRead(response http.ResponseWriter, request *http.Re
 	found, err := server.bookings.Get(request.Context(), parts[0])
 	if err != nil {
 		writeBookingError(response, err)
+		return
+	}
+	if !bookingVisible(response, request, found) {
 		return
 	}
 	writeJSON(response, http.StatusOK, found)

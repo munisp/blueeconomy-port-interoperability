@@ -143,14 +143,14 @@ func (store *Store) withTx(ctx context.Context, work func(pgx.Tx, tenantctx.Clai
 }
 
 const bookingColumns = `booking_id, tenant_id, request_id, truck_plate, trucker_msisdn, terminal_id,
-	slot_id, channel, status, amount_kobo, currency, cargo_declaration_ref, declared_weight_kg,
+	created_by, slot_id, channel, status, amount_kobo, currency, cargo_declaration_ref, declared_weight_kg,
 	consignee_id, operator_id, payment_receipt_ref, gate_id,
 	ledger_commit_hash, reconciliation_reason, created_at, updated_at, expires_at, version`
 
 func scanBooking(row pgx.Row) (Booking, error) {
 	var booking Booking
 	err := row.Scan(&booking.BookingID, &booking.TenantID, &booking.RequestID, &booking.TruckPlate,
-		&booking.TruckerMSISDN, &booking.TerminalID, &booking.SlotID, &booking.Channel, &booking.Status,
+		&booking.TruckerMSISDN, &booking.TerminalID, &booking.CreatedBy, &booking.SlotID, &booking.Channel, &booking.Status,
 		&booking.AmountKobo, &booking.Currency, &booking.CargoDeclarationRef, &booking.DeclaredWeightKg,
 		&booking.ConsigneeID, &booking.OperatorID, &booking.PaymentReceiptRef, &booking.GateID,
 		&booking.LedgerCommitHash, &booking.ReconciliationReason, &booking.CreatedAt, &booking.UpdatedAt,
@@ -370,13 +370,13 @@ func (store *Store) createTx(ctx context.Context, tx pgx.Tx, claims tenantctx.Cl
 	booking, err := scanBooking(tx.QueryRow(ctx, `
 		INSERT INTO truck_bookings (
 			booking_id, tenant_id, request_id, truck_plate, trucker_msisdn, terminal_id,
-			channel, status, amount_kobo, currency, cargo_declaration_ref, declared_weight_kg,
+			created_by, channel, status, amount_kobo, currency, cargo_declaration_ref, declared_weight_kg,
 			consignee_id, operator_id, created_at, updated_at, expires_at, version
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'NGN',$10,$11,$12,$13,$14,$14,$15,1)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'NGN',$11,$12,$13,$14,$15,$15,$16,1)
 		ON CONFLICT (tenant_id, request_id) DO NOTHING
 		RETURNING `+bookingColumns,
 		uuid.New(), claims.TenantID, request.RequestID, request.TruckPlate, request.TruckerMSISDN,
-		request.TerminalID, request.Channel, status, request.AmountKobo, declarationRef, declaredWeight,
+		request.TerminalID, principal.ID, request.Channel, status, request.AmountKobo, declarationRef, declaredWeight,
 		consigneeID, operatorID, now, request.ExpiresAt.UTC()))
 	if errors.Is(err, pgx.ErrNoRows) {
 		existing, lookupErr := scanBooking(tx.QueryRow(ctx, `SELECT `+bookingColumns+` FROM truck_bookings WHERE tenant_id=$1 AND request_id=$2 FOR UPDATE`, claims.TenantID, request.RequestID))

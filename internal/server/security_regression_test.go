@@ -7,6 +7,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+
+	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/declarations"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 	"testing"
 	"time"
 )
@@ -95,6 +99,85 @@ func TestBodySuppliedActorFieldsAreRejected(t *testing.T) {
 		handler.ServeHTTP(response, request)
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("%s with body actor field: status = %d, want 400", path, response.Code)
+		}
+	}
+}
+
+// PI-5 regression: booking reads are scoped to the creating subject; officer
+// roles may read across subjects; cross-subject access is denied 403.
+func TestBookingVisibilityScopesReadsToOwner(t *testing.T) {
+	owner := "alice-trucker"
+	found := booking.Booking{BookingID: "b-1", CreatedBy: &owner}
+	legacy := booking.Booking{BookingID: "b-2"} // no recorded creator
+
+	requestWithClaims := func(subject string, roles ...string) *http.Request {
+		request := httptest.NewRequest(http.MethodGet, "/v1/bookings/b-1", nil)
+		bound, err := tenantctx.WithClaims(request.Context(), tenantctx.Claims{
+			Issuer: "gateway.blueeconomy.ng", Audience: "s1-port-interoperability",
+			TenantID: "tenant-security-test", Subject: subject,
+			Expires: time.Now().Add(time.Hour).Unix(), Roles: roles,
+		})
+		if err != nil {
+			t.Fatalf("bind claims: %v", err)
+		}
+		return request.WithContext(bound)
+	}
+	visible := func(request *http.Request, b booking.Booking) (bool, int) {
+		response := httptest.NewRecorder()
+		ok := bookingVisible(response, request, b)
+		return ok, response.Code
+	}
+
+	if ok, _ := visible(requestWithClaims("alice-trucker"), found); !ok {
+		t.Fatal("owner must see their own booking")
+	}
+	if ok, code := visible(requestWithClaims("mallory"), found); ok || code != http.StatusForbidden {
+		t.Fatalf("cross-subject read: ok = %v, code = %d, want false/403", ok, code)
+	}
+	for _, role := range []string{RoleGateOfficer, RoleNPAOfficer, RolePortOperatorAdmin, RolePaymentSwitch} {
+		if ok, _ := visible(requestWithClaims("officer", role), found); !ok {
+			t.Fatalf("officer role %s must read across subjects", role)
+		}
+	}
+	// Legacy rows without a recorded creator are officer-readable only.
+	if ok, code := visible(requestWithClaims("alice-trucker"), legacy); ok || code != http.StatusForbidden {
+		t.Fatalf("legacy booking trader read: ok = %v, code = %d, want false/403", ok, code)
+	}
+	if ok, _ := visible(requestWithClaims("officer", RoleNPAOfficer), legacy); !ok {
+		t.Fatal("legacy booking must be officer-readable")
+	}
+}
+
+// PI-5 regression: declaration reads mirror list scoping — traders see only
+// their own declarations; customs and NPA officers may read across traders.
+func TestDeclarationVisibilityScopesReadsToTrader(t *testing.T) {
+	declaration := declarations.Declaration{DeclarationID: "d-1", TraderID: "trader-ada"}
+	requestWithClaims := func(subject string, roles ...string) *http.Request {
+		request := httptest.NewRequest(http.MethodGet, "/v1/declarations/d-1", nil)
+		bound, err := tenantctx.WithClaims(request.Context(), tenantctx.Claims{
+			Issuer: "gateway.blueeconomy.ng", Audience: "s1-port-interoperability",
+			TenantID: "tenant-security-test", Subject: subject,
+			Expires: time.Now().Add(time.Hour).Unix(), Roles: roles,
+		})
+		if err != nil {
+			t.Fatalf("bind claims: %v", err)
+		}
+		return request.WithContext(bound)
+	}
+	visible := func(request *http.Request) (bool, int) {
+		response := httptest.NewRecorder()
+		ok := declarationVisible(response, request, declaration)
+		return ok, response.Code
+	}
+	if ok, _ := visible(requestWithClaims("trader-ada")); !ok {
+		t.Fatal("owning trader must see their declaration")
+	}
+	if ok, code := visible(requestWithClaims("trader-mallory")); ok || code != http.StatusForbidden {
+		t.Fatalf("cross-trader read: ok = %v, code = %d, want false/403", ok, code)
+	}
+	for _, role := range []string{RoleCustomsOfficer, RoleNPAOfficer} {
+		if ok, _ := visible(requestWithClaims("officer", role)); !ok {
+			t.Fatalf("officer role %s must read across traders", role)
 		}
 	}
 }

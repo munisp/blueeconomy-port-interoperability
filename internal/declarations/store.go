@@ -312,6 +312,10 @@ func (store *Store) Submit(ctx context.Context, declarationID string, expectedVe
 		if err != nil {
 			return err
 		}
+		// Ownership: only the trader who owns the declaration may submit it.
+		if declaration.TraderID != principal.ID {
+			return ErrForbidden
+		}
 		if declaration.Version != expectedVersion {
 			return ErrOptimisticConflict
 		}
@@ -602,6 +606,10 @@ func (store *Store) Amend(ctx context.Context, declarationID string, request Cre
 		head, err := store.getForUpdate(ctx, tx, declarationID)
 		if err != nil {
 			return err
+		}
+		// Ownership: only the trader who owns the declaration may amend it.
+		if head.TraderID != principal.ID {
+			return ErrForbidden
 		}
 		if head.DeclarationRef != request.DeclarationRef {
 			return fmt.Errorf("%w: amendments keep the declaration ref", ErrDeclarationInvalid)

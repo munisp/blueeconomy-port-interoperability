@@ -67,3 +67,15 @@ func TestConfirmPaymentBindsReceiptToSwitchIssuedTxRef(t *testing.T) {
 	}
 }
 
+
+// PI-5 regression: bookings record the verified creating subject as the
+// ownership anchor for read access control.
+func TestCreateRecordsCreatorSubject(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.cleanup()
+	terminalID, _ := env.makeTerminalAndSlot(t, 1)
+	created := env.makeBooking(t, terminalID, "req-owner-0001", ChannelWeb)
+	if created.CreatedBy == nil || *created.CreatedBy != "test-trucker" {
+		t.Fatalf("created_by = %v, want test-trucker", created.CreatedBy)
+	}
+}

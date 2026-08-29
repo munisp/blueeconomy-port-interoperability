@@ -68,6 +68,25 @@ func (server *Server) listDeclarations(response http.ResponseWriter, request *ht
 	writeJSON(response, http.StatusOK, map[string]any{"declarations": list})
 }
 
+// declarationVisible enforces declaration ownership for reads, mirroring the
+// list endpoint scoping: a trader sees only their own declarations
+// (trader_id = verified subject); customs and NPA officers may read across
+// traders per the platform role model.
+func declarationVisible(response http.ResponseWriter, request *http.Request, declaration declarations.Declaration) bool {
+	claims, ok := claimsOf(response, request)
+	if !ok {
+		return false
+	}
+	if declaration.TraderID == claims.Subject {
+		return true
+	}
+	if claims.HasAnyRole(RoleCustomsOfficer, RoleNPAOfficer) {
+		return true
+	}
+	writeError(response, http.StatusForbidden, "declaration belongs to a different trader")
+	return false
+}
+
 // declarationRead handles GET /v1/declarations/{id} and
 // GET /v1/declarations/{id}/clearance-certificate.
 func (server *Server) declarationRead(response http.ResponseWriter, request *http.Request) {
@@ -79,6 +98,9 @@ func (server *Server) declarationRead(response http.ResponseWriter, request *htt
 			writeDeclarationError(response, err)
 			return
 		}
+		if !declarationVisible(response, request, declaration) {
+			return
+		}
 		writeJSON(response, http.StatusOK, declaration)
 		return
 	}
@@ -86,6 +108,9 @@ func (server *Server) declarationRead(response http.ResponseWriter, request *htt
 		certificate, declaration, err := server.declarations.ClearanceCertificate(request.Context(), parts[0])
 		if err != nil {
 			writeDeclarationError(response, err)
+			return
+		}
+		if !declarationVisible(response, request, declaration) {
 			return
 		}
 		writeJSON(response, http.StatusOK, map[string]any{
@@ -178,6 +203,8 @@ func writeDeclarationError(response http.ResponseWriter, err error) {
 		writeError(response, http.StatusConflict, err.Error())
 	case errors.Is(err, declarations.ErrNotCleared):
 		writeError(response, http.StatusConflict, err.Error())
+	case errors.Is(err, declarations.ErrForbidden):
+		writeError(response, http.StatusForbidden, err.Error())
 	case errors.Is(err, declarations.ErrDeclarationInvalid), errors.Is(err, declarations.ErrPermitInvalid):
 		writeError(response, http.StatusUnprocessableEntity, err.Error())
 	default:

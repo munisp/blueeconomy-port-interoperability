@@ -72,6 +72,9 @@ var (
 	ErrDeclarationInvalid  = errors.New("declaration does not satisfy the business rules")
 	ErrNotCleared          = errors.New("declaration has no clearance certificate before CLEARED")
 	ErrPermitInvalid       = errors.New("a linked OGA permit is not approved or has expired")
+	// ErrForbidden means the verified principal does not own the declaration
+	// (trader_id mismatch); cross-trader mutation or read is denied.
+	ErrForbidden = errors.New("declaration belongs to a different trader")
 )
 
 // transitions is the complete fail-closed declaration state machine. Any pair
