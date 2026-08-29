@@ -484,16 +484,32 @@ func (store *Store) amendClearanceTx(ctx context.Context, tx pgx.Tx, claims tena
 		return Clearance{}, ErrClearanceConflict
 	}
 	now := time.Now().UTC()
+	// The amendment advances the port call in the same transaction: the
+	// optimistic-concurrency version is bumped and the port-call status is
+	// aligned with the latest decision (APPROVED keeps ACCEPTED, REJECTED
+	// moves the call to REJECTED).
+	newVersion := callVersion + 1
+	callStatus := StatusAccepted
+	if request.Decision == ClearanceRejected {
+		callStatus = StatusRejected
+	}
 	amended := prior
 	amended.Decision = request.Decision
 	amended.Reason = request.Reason
 	amended.DecidedBy = request.AmendedBy
-	amended.CallVersion = callVersion
+	amended.CallVersion = newVersion
 	amended.DecidedAt = now
 	if _, err := tx.Exec(ctx, `UPDATE port_call_clearance_decisions SET decision=$1,reason=$2,decided_by=$3,call_version=$4,decided_at=$5 WHERE decision_id=$6`, amended.Decision, amended.Reason, amended.DecidedBy, amended.CallVersion, amended.DecidedAt, prior.DecisionID); err != nil {
 		return Clearance{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO port_call_clearance_amendments (amendment_id,call_id,prior_decision_id,prior_decision,amended_decision,reason,amended_by,call_version,amended_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, uuid.New(), callID, prior.DecisionID, prior.Decision, amended.Decision, amended.Reason, amended.DecidedBy, callVersion, now); err != nil {
+	updated, err := tx.Exec(ctx, `UPDATE port_calls SET version=$1, status=$2, updated_at=$3 WHERE call_id=$4 AND version=$5`, newVersion, string(callStatus), now, callID, callVersion)
+	if err != nil {
+		return Clearance{}, fmt.Errorf("advance port call for amendment: %w", err)
+	}
+	if updated.RowsAffected() != 1 {
+		return Clearance{}, ErrOptimisticConflict
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO port_call_clearance_amendments (amendment_id,call_id,prior_decision_id,prior_decision,amended_decision,reason,amended_by,call_version,amended_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, uuid.New(), callID, prior.DecisionID, prior.Decision, amended.Decision, amended.Reason, amended.DecidedBy, newVersion, now); err != nil {
 		return Clearance{}, err
 	}
 	payload, _ := json.Marshal(amended)
