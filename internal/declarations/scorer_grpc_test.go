@@ -2,7 +2,6 @@ package declarations
 
 import (
 	"context"
-	"net"
 	"testing"
 	"time"
 
@@ -133,13 +132,7 @@ func TestBreakerOpenFailsClosedWithoutSilentPass(t *testing.T) {
 	// Scorer down hard (connection refused) with a low threshold: the
 	// breaker opens and subsequent scores fail fast. No declaration ever
 	// passes silently — every path returns an error.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	address := listener.Addr().String()
-	_ = listener.Close()
-	scorer := newTestScorer(t, address, func(config *GRPCScorerConfig) {
+	scorer := newTestScorer(t, reserveDeadAddress(t), func(config *GRPCScorerConfig) {
 		config.MaxRetries = 0
 		config.Timeout = 200 * time.Millisecond
 		config.BreakerFailureThreshold = 2

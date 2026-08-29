@@ -256,14 +256,8 @@ func TestEndToEndBadTokenIsUnauthenticatedAndNotRetried(t *testing.T) {
 
 func TestEndToEndScorerDownFailsClosed(t *testing.T) {
 	keycloak := newE2EKeycloak(t)
-	// Scorer down: reserve-and-release an address so nothing is listening.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	deadAddress := listener.Addr().String()
-	_ = listener.Close()
-	scorer := newE2EScorer(t, deadAddress, newE2ETokenSource(t, keycloak))
+	// Scorer down: nothing is listening on the dead address.
+	scorer := newE2EScorer(t, reserveDeadAddress(t), newE2ETokenSource(t, keycloak))
 	if _, err := scorer.Score(context.Background(), scoreRequest()); err == nil {
 		t.Fatal("scorer down must fail closed — the declaration must not pass silently")
 	}
