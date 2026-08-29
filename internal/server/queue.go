@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -91,18 +93,25 @@ func (server *Server) queueOperation(response http.ResponseWriter, request *http
 }
 
 // startPromotedCallUps (idempotently) starts the grace-window workflow for
-// every request promoted by a capacity-release chain.
-func (server *Server) startPromotedCallUps(request *http.Request, promoted *queue.Request) {
+// every request promoted by a capacity-release chain. A start failure is
+// propagated, never swallowed: the promoted truck's grace window must not
+// silently never start — the caller surfaces a retryable 502 and the
+// background sweeper re-ensures the workflow on its next pass.
+func (server *Server) startPromotedCallUps(request *http.Request, promoted *queue.Request) error {
 	if promoted == nil || promoted.GraceDeadline == nil {
-		return
+		return nil
 	}
-	_ = server.callUps.StartCallUpWorkflow(request.Context(), queue.CallUpWorkflowInput{
+	if err := server.callUps.StartCallUpWorkflow(request.Context(), queue.CallUpWorkflowInput{
 		QueueRequestID: promoted.QueueRequestID,
 		TenantID:       promoted.TenantID,
 		PrincipalID:    principalOf(request, "callup-engine").ID,
 		TerminalID:     promoted.TerminalID,
 		GraceDeadline:  *promoted.GraceDeadline,
-	})
+	}); err != nil {
+		log.Printf("call-up workflow start failed for promoted request %s: %v", promoted.QueueRequestID, err)
+		return fmt.Errorf("start grace-window workflow for promoted request %s: %w", promoted.QueueRequestID, err)
+	}
+	return nil
 }
 
 // arriveQueueRequest is the gate arrival path: the gate officer confirms a
@@ -124,7 +133,13 @@ func (server *Server) arriveQueueRequest(response http.ResponseWriter, request *
 		writeQueueError(response, err)
 		return
 	}
-	server.startPromotedCallUps(request, promoted)
+	if err := server.startPromotedCallUps(request, promoted); err != nil {
+		writeJSON(response, http.StatusBadGateway, map[string]string{
+			"error":            "arrival recorded but the promoted call-up workflow could not start; the sweeper will retry, or retry this arrival",
+			"queue_request_id": queueRequestID,
+		})
+		return
+	}
 	// The workflow may not exist yet when promotion happened through the
 	// in-transaction capacity hook; starting is idempotent before signalling.
 	if arrived.GraceDeadline != nil {
@@ -185,7 +200,13 @@ func (server *Server) cancelQueueRequest(response http.ResponseWriter, request *
 		writeQueueError(response, err)
 		return
 	}
-	server.startPromotedCallUps(request, promoted)
+	if err := server.startPromotedCallUps(request, promoted); err != nil {
+		writeJSON(response, http.StatusBadGateway, map[string]string{
+			"error":            "cancellation recorded but the promoted call-up workflow could not start; the sweeper will retry",
+			"queue_request_id": queueRequestID,
+		})
+		return
+	}
 	writeJSON(response, http.StatusOK, cancelled)
 }
 

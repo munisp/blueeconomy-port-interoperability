@@ -1,15 +1,18 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/declarations"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 	"testing"
 	"time"
@@ -179,5 +182,40 @@ func TestDeclarationVisibilityScopesReadsToTrader(t *testing.T) {
 		if ok, _ := visible(requestWithClaims("officer", role)); !ok {
 			t.Fatalf("officer role %s must read across traders", role)
 		}
+	}
+}
+
+// failingCallUps is a call-up orchestrator whose workflow starts always fail,
+// modelling a Temporal outage.
+type failingCallUps struct{ fakeCallUps }
+
+func (failingCallUps) StartCallUpWorkflow(context.Context, queue.CallUpWorkflowInput) error {
+	return errors.New("temporal unreachable")
+}
+
+// PI-10 regression: a failed grace-window workflow start for a promoted
+// request is propagated, never swallowed — the helper returns the error so
+// callers answer a retryable 502 and the sweeper re-ensures the workflow.
+func TestStartPromotedCallUpsPropagatesStarterFailure(t *testing.T) {
+	server := &Server{callUps: failingCallUps{}}
+	deadline := time.Now().Add(time.Hour).UTC()
+	promoted := &queue.Request{
+		QueueRequestID: "QR-1", TenantID: "tenant-security-test",
+		TerminalID: "APAPA-T1", Status: queue.StatusCalledUp, GraceDeadline: &deadline,
+	}
+	request := loopbackRequest(http.MethodPost, "/v1/queue-requests/QR-0/cancel",
+		`{"expected_version":1,"reason":"test"}`)
+	request.Header.Set("Authorization", "Bearer "+mintToken(t, "officer-1"))
+	if err := server.startPromotedCallUps(request, promoted); err == nil {
+		t.Fatal("starter failure must be propagated")
+	}
+	// No promotion or no grace deadline: no workflow needed, no error.
+	serverOK := &Server{callUps: failingCallUps{}}
+	if err := serverOK.startPromotedCallUps(request, nil); err != nil {
+		t.Fatalf("nil promotion must be a no-op: %v", err)
+	}
+	noDeadline := &queue.Request{QueueRequestID: "QR-2", TenantID: "tenant-security-test", TerminalID: "APAPA-T1"}
+	if err := serverOK.startPromotedCallUps(request, noDeadline); err != nil {
+		t.Fatalf("promotion without grace deadline must be a no-op: %v", err)
 	}
 }
