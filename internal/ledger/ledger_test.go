@@ -131,7 +131,7 @@ func settlementFixture() Settlement {
 
 func TestCommitAcceptsCreatedOnFirstCommit(t *testing.T) {
 	fake := &fakeClient{
-		accountStatuses:  []tb.CreateAccountStatus{tb.AccountCreated, tb.AccountCreated, tb.AccountCreated},
+		accountStatuses:  []tb.CreateAccountStatus{tb.AccountCreated, tb.AccountCreated, tb.AccountCreated, tb.AccountCreated},
 		transferStatuses: []tb.CreateTransferStatus{tb.TransferCreated, tb.TransferCreated},
 	}
 	ledger := &TigerBeetleLedger{client: fake}
@@ -160,7 +160,7 @@ func TestCommitAcceptsCreatedOnFirstCommit(t *testing.T) {
 
 func TestCommitAcceptsExistsOnIdempotentRetry(t *testing.T) {
 	fake := &fakeClient{
-		accountStatuses:  []tb.CreateAccountStatus{tb.AccountExists, tb.AccountExists, tb.AccountExists},
+		accountStatuses:  []tb.CreateAccountStatus{tb.AccountExists, tb.AccountExists, tb.AccountExists, tb.AccountExists},
 		transferStatuses: []tb.CreateTransferStatus{tb.TransferExists, tb.TransferExists},
 	}
 	ledger := &TigerBeetleLedger{client: fake}
@@ -180,7 +180,7 @@ func TestCommitRejectsGenuineTransferConflict(t *testing.T) {
 		tb.TransferExceedsCredits,
 	} {
 		fake := &fakeClient{
-			accountStatuses:  []tb.CreateAccountStatus{tb.AccountExists, tb.AccountExists, tb.AccountExists},
+			accountStatuses:  []tb.CreateAccountStatus{tb.AccountExists, tb.AccountExists, tb.AccountExists, tb.AccountExists},
 			transferStatuses: []tb.CreateTransferStatus{tb.TransferCreated, status},
 		}
 		ledger := &TigerBeetleLedger{client: fake}
@@ -214,7 +214,7 @@ func TestCommitRejectsNonDenseResults(t *testing.T) {
 	// A truncated (pre-0.17 sparse-style) result array must fail closed rather
 	// than silently treat missing statuses as success.
 	fake := &fakeClient{
-		accountStatuses:  []tb.CreateAccountStatus{tb.AccountCreated, tb.AccountCreated, tb.AccountCreated},
+		accountStatuses:  []tb.CreateAccountStatus{tb.AccountCreated, tb.AccountCreated, tb.AccountCreated, tb.AccountCreated},
 		transferStatuses: []tb.CreateTransferStatus{tb.TransferCreated},
 	}
 	ledger := &TigerBeetleLedger{client: fake}
@@ -231,5 +231,77 @@ func TestCommitPropagatesClientErrors(t *testing.T) {
 	ledger := &TigerBeetleLedger{client: fake}
 	if _, err := ledger.CommitBookingSettlement(t.Context(), settlementFixture()); err == nil {
 		t.Fatal("client errors must propagate")
+	}
+}
+
+func TestRefundIdentifiersAreDeterministicAndDisjoint(t *testing.T) {
+	if RefundTransferID("booking-0001", "operator") != RefundTransferID("booking-0001", "operator") {
+		t.Fatal("refund transfer ids must be deterministic for idempotent retries")
+	}
+	if RefundTransferID("booking-0001", "operator") == RefundTransferID("booking-0001", "fgn") {
+		t.Fatal("refund legs must have distinct transfer ids")
+	}
+	if RefundTransferID("booking-0001", "operator") == TransferID("booking-0001", "operator") {
+		t.Fatal("refund transfer ids must never collide with settlement transfer ids")
+	}
+	if AccountID("trucker-clearing") == AccountID("trucker-payable") {
+		t.Fatal("trucker clearing and payable must be distinct accounts")
+	}
+	if len(RefundCommitHash("booking-0001")) != len("sha256:")+64 {
+		t.Fatal("refund commit hash must be a sha256 digest")
+	}
+}
+
+func TestRefundRejectsInvalidRefunds(t *testing.T) {
+	// Refund validation happens before any cluster interaction, so these
+	// checks hold without a running TigerBeetle.
+	ledgerClient, err := NewTigerBeetle("0", []string{"127.0.0.1:1"})
+	if err != nil {
+		t.Fatalf("client construction: %v", err)
+	}
+	defer ledgerClient.Close()
+	for _, refund := range []Refund{
+		{BookingID: "", AmountKobo: 250000, FgnShareKobo: 6250},
+		{BookingID: "booking-1", AmountKobo: 0, FgnShareKobo: 0},
+		{BookingID: "booking-1", AmountKobo: 250000, FgnShareKobo: 0},
+		{BookingID: "booking-1", AmountKobo: 250000, FgnShareKobo: 250000},
+	} {
+		if _, err := ledgerClient.RefundBookingSettlement(t.Context(), refund); err == nil {
+			t.Fatalf("refund %#v must be rejected", refund)
+		}
+	}
+}
+
+func TestRefundPostsCompensatingBalancedLegs(t *testing.T) {
+	fake := &fakeClient{
+		accountStatuses:  []tb.CreateAccountStatus{tb.AccountCreated, tb.AccountCreated, tb.AccountCreated, tb.AccountExists},
+		transferStatuses: []tb.CreateTransferStatus{tb.TransferCreated, tb.TransferCreated},
+	}
+	ledgerClient := &TigerBeetleLedger{client: fake}
+	hash, err := ledgerClient.RefundBookingSettlement(t.Context(), Refund{BookingID: "booking-0001", AmountKobo: 250000, FgnShareKobo: 6250})
+	if err != nil {
+		t.Fatalf("refund commit: %v", err)
+	}
+	if hash != RefundCommitHash("booking-0001") {
+		t.Fatalf("refund commit hash mismatch: %q", hash)
+	}
+	if len(fake.sawTransfers) != 2 {
+		t.Fatalf("expected two refund legs, got %d", len(fake.sawTransfers))
+	}
+	operator := fake.sawTransfers[0]
+	fgn := fake.sawTransfers[1]
+	if operator.ID != RefundTransferID("booking-0001", "operator") || fgn.ID != RefundTransferID("booking-0001", "fgn") {
+		t.Fatal("refund legs must use deterministic refund transfer ids")
+	}
+	// Compensating direction: operator and FGN shares flow back to the
+	// trucker clearing account, re-balancing the original settlement.
+	if operator.DebitAccountID != AccountID("terminal-operator") || operator.CreditAccountID != AccountID("trucker-clearing") {
+		t.Fatal("operator refund leg must move terminal-operator -> trucker-clearing")
+	}
+	if fgn.DebitAccountID != AccountID("fgn-share") || fgn.CreditAccountID != AccountID("trucker-clearing") {
+		t.Fatal("FGN refund leg must move fgn-share -> trucker-clearing")
+	}
+	if operator.Amount != tb.ToUint128(250000-6250) || fgn.Amount != tb.ToUint128(6250) {
+		t.Fatal("refund legs must re-balance the original operator/FGN split exactly")
 	}
 }

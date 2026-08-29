@@ -25,6 +25,10 @@ const (
 	StatusExpired                Status = "EXPIRED"
 	StatusRejected               Status = "REJECTED"
 	StatusReconciliationRequired Status = "RECONCILIATION_REQUIRED"
+	// StatusRefunded is the terminal state of a paid booking whose expiry or
+	// cancellation triggered the compensating settlement transfer back to
+	// the trucker clearing account.
+	StatusRefunded Status = "REFUNDED"
 )
 
 type Channel string
@@ -48,6 +52,10 @@ var (
 	// bound to a different booking (pay-once-board-many attempt). The
 	// DB-enforced unique index backs this error.
 	ErrPaymentReceiptReuse = errors.New("payment receipt reference is already bound to another booking")
+	// ErrRefundUnavailable means a paid booking needed the refund rail but no
+	// refund poster is wired (or the ledger call failed); the transition is
+	// refused so money is never silently stranded.
+	ErrRefundUnavailable = errors.New("refund rail is unavailable; paid booking was left unchanged")
 )
 
 // transitions is the complete fail-closed booking state machine. Any pair not
@@ -72,12 +80,14 @@ var transitions = map[Status]map[Status]bool{
 		StatusValidationPending: true, // customs cross-validation starts
 		StatusExpired:           true,
 		StatusCancelled:         true,
+		StatusRefunded:          true, // paid booking cancelled/expired: compensating refund posted
 	},
 	StatusValidationPending: {
 		StatusPaid:      true, // customs validation matched: gate eligibility restored
 		StatusRejected:  true, // customs validation mismatch: fail closed with reason code
 		StatusExpired:   true,
 		StatusCancelled: true,
+		StatusRefunded:  true, // paid booking cancelled/expired mid-validation: refund posted
 	},
 	StatusGateApproved: {
 		StatusCompleted: true,

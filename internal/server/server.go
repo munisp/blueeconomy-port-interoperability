@@ -418,6 +418,8 @@ func writeBookingError(response http.ResponseWriter, err error) {
 		writeError(response, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, booking.ErrGateDenied):
 		writeError(response, http.StatusForbidden, err.Error())
+	case errors.Is(err, booking.ErrRefundUnavailable):
+		writeError(response, http.StatusServiceUnavailable, err.Error())
 	default:
 		writeError(response, http.StatusInternalServerError, "internal booking failure")
 	}

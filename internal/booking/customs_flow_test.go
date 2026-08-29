@@ -83,7 +83,9 @@ func (env testEnv) payBooking(t *testing.T, booking Booking, slot Slot) Booking 
 	if _, err := env.store.CreatePaymentIntent(env.ctx, booking.BookingID, "pay-"+booking.RequestID, "tx-"+booking.RequestID, reserved.Version); err != nil {
 		t.Fatalf("create payment intent: %v", err)
 	}
-	paid, err := env.store.ConfirmPayment(env.ctx, booking.BookingID, "rcpt-"+booking.RequestID, reserved.Version, trucker)
+	// The confirmation must present the exact switch-issued tx_ref of the
+	// booking's intent (PI-1 binding); anything else is rejected.
+	paid, err := env.store.ConfirmPayment(env.ctx, booking.BookingID, "tx-"+booking.RequestID, reserved.Version, trucker)
 	if err != nil {
 		t.Fatalf("confirm payment: %v", err)
 	}

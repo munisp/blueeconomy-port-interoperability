@@ -48,6 +48,12 @@ func run() error {
 	if err != nil || graceMinutes < 1 {
 		return errors.New("CALLUP_GRACE_MINUTES must be a positive integer")
 	}
+	// FGN_SHARE_BASIS_POINTS must match the API service exactly: the refund
+	// rail reproduces the operator/FGN split when a paid booking expires.
+	fgnShareBPS, err := strconv.ParseInt(requiredEnv("FGN_SHARE_BASIS_POINTS"), 10, 64)
+	if err != nil || fgnShareBPS <= 0 || fgnShareBPS >= 10000 {
+		return errors.New("FGN_SHARE_BASIS_POINTS must be an integer between 1 and 9999")
+	}
 	sweepSeconds, err := strconv.Atoi(defaultEnv("QUEUE_SWEEP_INTERVAL_SECONDS", "60"))
 	if err != nil || sweepSeconds < 5 {
 		return errors.New("QUEUE_SWEEP_INTERVAL_SECONDS must be an integer >= 5")
@@ -105,6 +111,11 @@ func run() error {
 	}
 	// Workflow-driven booking expiry also promotes the queue head in-tx.
 	bookingStore.SetCapacityListener(queueStore)
+	// Refund rail: paid bookings expired by the workflow/sweeper path post a
+	// compensating settlement transfer before reaching REFUNDED.
+	if err := bookingStore.SetRefundPoster(settlement, fgnShareBPS); err != nil {
+		return fmt.Errorf("wire refund rail: %w", err)
+	}
 	callUpActivities, err := queue.NewCallUpActivities(queueStore)
 	if err != nil {
 		return err

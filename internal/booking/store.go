@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/customs"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/ledger"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantdb"
 )
@@ -36,6 +37,12 @@ type Store struct {
 	pool     *pgxpool.Pool
 	signer   *events.Signer
 	listener CapacityListener
+	// refunder posts the compensating settlement transfer when a paid
+	// booking is cancelled or expires; fgnShareBPS reproduces the exact
+	// operator/FGN split used at settlement time.
+	refunder    ledger.Refunder
+	fgnShareBPS int64
+	refundWired bool
 }
 
 // NewStore builds the booking store. The envelope signer is mandatory:
@@ -49,6 +56,44 @@ func NewStore(pool *pgxpool.Pool, signer *events.Signer) *Store {
 // disables it; releases then leave queue promotion to the sweeper.
 func (store *Store) SetCapacityListener(listener CapacityListener) {
 	store.listener = listener
+}
+
+// SetRefundPoster wires the refund rail. Once wired, cancelling or expiring
+// a PAID/VALIDATION_PENDING booking posts the compensating TigerBeetle
+// transfer (operator + FGN shares back to trucker clearing) before the
+// REFUNDED transition; when the poster or the ledger is unavailable the
+// transition fails closed and the booking is left unchanged.
+func (store *Store) SetRefundPoster(refunder ledger.Refunder, fgnShareBPS int64) error {
+	if refunder == nil || fgnShareBPS <= 0 || fgnShareBPS >= 10000 {
+		return errors.New("refund poster requires a ledger refunder and an FGN share between 1 and 9999 basis points")
+	}
+	store.refunder = refunder
+	store.fgnShareBPS = fgnShareBPS
+	store.refundWired = true
+	return nil
+}
+
+// refundIfPaid posts the compensating settlement transfer for a booking that
+// holds trucker money (PAID or VALIDATION_PENDING). It returns the refund
+// commit hash, or "" when the booking was never paid. Fail-closed: any
+// refund-rail problem is an error and the caller must not transition.
+func (store *Store) refundIfPaid(ctx context.Context, booking Booking) (string, error) {
+	if booking.Status != StatusPaid && booking.Status != StatusValidationPending {
+		return "", nil
+	}
+	if !store.refundWired {
+		return "", ErrRefundUnavailable
+	}
+	fgnShare := uint64(booking.AmountKobo * store.fgnShareBPS / 10000)
+	commitHash, err := store.refunder.RefundBookingSettlement(ctx, ledger.Refund{
+		BookingID:    booking.BookingID,
+		AmountKobo:   uint64(booking.AmountKobo),
+		FgnShareKobo: fgnShare,
+	})
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrRefundUnavailable, err)
+	}
+	return commitHash, nil
 }
 
 // capacityReleased notifies the listener, when wired, that a booking left a
@@ -914,7 +959,11 @@ func (store *Store) Complete(ctx context.Context, bookingID string, expectedVers
 	return completed, err
 }
 
-// Cancel moves any non-terminal booking into CANCELLED.
+// Cancel moves any non-terminal booking into CANCELLED — or, when the
+// booking holds trucker money (PAID/VALIDATION_PENDING), posts the
+// compensating refund transfer and lands in REFUNDED. The refund is posted
+// before the transition and its commit hash is recorded on the booking; a
+// refund-rail outage fails closed and the booking is left unchanged.
 func (store *Store) Cancel(ctx context.Context, bookingID string, expectedVersion int64, reason string, principal Principal) (Booking, error) {
 	if reason == "" || len(reason) > 1024 {
 		return Booking{}, errors.New("cancellation reason is required")
@@ -928,9 +977,25 @@ func (store *Store) Cancel(ctx context.Context, bookingID string, expectedVersio
 		if booking.Version != expectedVersion {
 			return ErrOptimisticConflict
 		}
-		result, err := store.transitionTx(ctx, tx, claims, booking, StatusCancelled, func(updated *Booking) {
+		refundHash, err := store.refundIfPaid(ctx, booking)
+		if err != nil {
+			return err
+		}
+		next := StatusCancelled
+		eventType := "booking.cancelled"
+		extensions := map[string]string{"reason": reason}
+		if refundHash != "" {
+			next = StatusRefunded
+			eventType = "booking.refunded"
+			extensions["refund-commit-hash"] = refundHash
+			extensions["refunded-amount-kobo"] = fmt.Sprintf("%d", booking.AmountKobo)
+		}
+		result, err := store.transitionTx(ctx, tx, claims, booking, next, func(updated *Booking) {
 			updated.ReconciliationReason = &reason
-		}, "booking.cancelled", map[string]string{"reason": reason}, principal, "")
+			if refundHash != "" {
+				updated.LedgerCommitHash = &refundHash
+			}
+		}, eventType, extensions, principal, refundHash)
 		if err != nil {
 			return err
 		}
@@ -943,7 +1008,12 @@ func (store *Store) Cancel(ctx context.Context, bookingID string, expectedVersio
 	return cancelled, err
 }
 
-// ExpireDue sweeps reserved/paid bookings whose validity elapsed into EXPIRED.
+// ExpireDue sweeps reserved/paid bookings whose validity elapsed. Unpaid
+// bookings expire into EXPIRED; bookings holding trucker money (PAID,
+// VALIDATION_PENDING) are first refunded through the compensating ledger
+// transfer and land in REFUNDED. A refund-rail outage fails closed: the
+// affected booking keeps its state and the sweep surfaces the error so the
+// retry can complete the refund.
 func (store *Store) ExpireDue(ctx context.Context, now time.Time, principal Principal) (int, error) {
 	count := 0
 	err := store.withTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
@@ -966,7 +1036,27 @@ func (store *Store) ExpireDue(ctx context.Context, now time.Time, principal Prin
 			return err
 		}
 		for _, booking := range due {
-			if _, err := store.transitionTx(ctx, tx, claims, booking, StatusExpired, nil, "booking.expired", nil, principal, ""); err != nil {
+			refundHash, err := store.refundIfPaid(ctx, booking)
+			if err != nil {
+				return err
+			}
+			next := StatusExpired
+			eventType := "booking.expired"
+			var extensions map[string]string
+			if refundHash != "" {
+				next = StatusRefunded
+				eventType = "booking.refunded"
+				extensions = map[string]string{
+					"refund-commit-hash":   refundHash,
+					"refunded-amount-kobo": fmt.Sprintf("%d", booking.AmountKobo),
+					"expired-at":           now.UTC().Format(time.RFC3339),
+				}
+			}
+			if _, err := store.transitionTx(ctx, tx, claims, booking, next, func(updated *Booking) {
+				if refundHash != "" {
+					updated.LedgerCommitHash = &refundHash
+				}
+			}, eventType, extensions, principal, refundHash); err != nil {
 				return err
 			}
 			if err := store.capacityReleased(ctx, tx, claims, booking, principal); err != nil {

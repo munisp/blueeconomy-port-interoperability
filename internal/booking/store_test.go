@@ -236,7 +236,7 @@ func TestGateScanControllerValidatesBookingSlotAndPayment(t *testing.T) {
 		t.Fatalf("idempotent payment intent replay: %v", err)
 	}
 	_ = intent
-	paid, err := env.store.ConfirmPayment(env.ctx, booking.BookingID, "rcpt-0001", reserved.Version, trucker)
+	paid, err := env.store.ConfirmPayment(env.ctx, booking.BookingID, "tx-ref-0001", reserved.Version, trucker)
 	if err != nil {
 		t.Fatalf("confirm payment: %v", err)
 	}

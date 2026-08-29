@@ -18,6 +18,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/declarations"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/ledger"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
@@ -84,6 +85,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("configure Mojaloop gateway: %w", err)
 	}
+	// The refund rail is mandatory wiring: cancelling a paid booking posts a
+	// compensating TigerBeetle transfer, so the API service refuses to boot
+	// without a ledger (fail closed — never strand trucker money).
+	settlement, err := ledger.NewTigerBeetle(requiredEnv("TIGERBEETLE_CLUSTER_ID"), strings.Split(requiredEnv("TIGERBEETLE_ADDRESSES"), ","))
+	if err != nil {
+		return fmt.Errorf("configure TigerBeetle refund rail: %w", err)
+	}
+	defer settlement.Close()
 	orchestrator, err := booking.NewTemporalOrchestrator(requiredEnv("TEMPORAL_ADDRESS"), requiredEnv("TEMPORAL_NAMESPACE"), requiredEnv("TEMPORAL_TASK_QUEUE"))
 	if err != nil {
 		return fmt.Errorf("configure Temporal orchestrator: %w", err)
@@ -160,6 +169,11 @@ func run() error {
 	// Call-up engine hook: booking slot releases promote the head of the
 	// terminal queue in the same transaction.
 	bookingStore.SetCapacityListener(queueStore)
+	// Refund rail: paid bookings cancelled through the API post a
+	// compensating settlement transfer before reaching REFUNDED.
+	if err := bookingStore.SetRefundPoster(settlement, fgnShareBPS); err != nil {
+		return fmt.Errorf("wire refund rail: %w", err)
+	}
 	handler, err := server.New(server.Config{
 		Store:                     portcall.NewStore(pool),
 		Bookings:                  bookingStore,
