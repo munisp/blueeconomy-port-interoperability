@@ -39,6 +39,9 @@ func run() error {
 	migrationPaths := requiredEnv("MIGRATION_PATH")
 	port := requiredEnv("PORT")
 	tenantID := requiredEnv("USSD_TENANT_ID")
+	// The carrier callback shared secret is mandatory at boot: without it
+	// anyone could drive booking/queue flows with an asserted phone number.
+	callbackSecret := requiredEnv("USSD_CALLBACK_SECRET")
 	ttlSeconds, err := strconv.Atoi(defaultEnv("USSD_SESSION_TTL_SECONDS", "300"))
 	if err != nil || ttlSeconds < 30 {
 		return errors.New("USSD_SESSION_TTL_SECONDS must be an integer >= 30")
@@ -124,12 +127,19 @@ func run() error {
 		handler.Callback(response, request.WithContext(bound))
 	})
 
+	// The carrier callback is authenticated with the shared secret (timing-
+	// safe comparison); the health endpoint stays unauthenticated.
+	authenticated, err := ussd.AuthenticateCallback(callbackSecret, http.MaxBytesHandler(tenantBound, 1<<20))
+	if err != nil {
+		return fmt.Errorf("configure callback authentication: %w", err)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(response http.ResponseWriter, _ *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
 		_, _ = response.Write([]byte(`{"status":"ok"}`))
 	})
-	mux.Handle("POST /ussd/callback", http.MaxBytesHandler(tenantBound, 1<<20))
+	mux.Handle("POST /ussd/callback", authenticated)
 
 	httpServer := &http.Server{
 		Addr:              ":" + port,

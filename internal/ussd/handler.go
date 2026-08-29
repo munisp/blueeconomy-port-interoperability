@@ -20,14 +20,18 @@ import (
 
 // Directory is the booking operations the USSD flow may perform.
 type Directory interface {
-	BookingStatus(ctx context.Context, bookingID string) (booking.Booking, error)
+	// BookingStatus must return the booking only when its contact MSISDN
+	// matches the session MSISDN, and booking.ErrNotFound otherwise — one
+	// phone may never enumerate another phone's bookings.
+	BookingStatus(ctx context.Context, bookingID, msisdn string) (booking.Booking, error)
 	BookSlotByID(ctx context.Context, slotID, truckPlate, msisdn, requestID string) (booking.Booking, error)
 }
 
 // QueueDirectory is the call-up queue operations the USSD flow may perform.
 type QueueDirectory interface {
 	RequestQueueEntry(ctx context.Context, terminalID, truckPlate, msisdn, requestID string) (queue.Request, error)
-	QueueStatus(ctx context.Context, queueRequestID string) (queue.Request, error)
+	// QueueStatus is MSISDN-bound exactly like BookingStatus.
+	QueueStatus(ctx context.Context, queueRequestID, msisdn string) (queue.Request, error)
 }
 
 // Session is the Redis-held state of one USSD dialogue.
@@ -55,6 +59,9 @@ func NewSessionStore(client *redis.Client, ttl time.Duration) (*SessionStore, er
 	return &SessionStore{client: client, ttl: ttl}, nil
 }
 
+// key namespaces sessions by the session MSISDN: a client-chosen sessionId
+// can only ever collide within the same phone's session space, never across
+// carriers or phones.
 func (store *SessionStore) key(sessionID string) string {
 	return "ussd:session:" + sessionID
 }
@@ -101,6 +108,56 @@ func NewHandler(directory Directory, queues QueueDirectory, sessions *SessionSto
 
 const menu = "Welcome to eCallUp 2.0\n1. Booking status\n2. Book a slot\n3. Request queue entry\n4. Check queue position"
 
+// msisdnDigits strips everything but digits; bookings and queue requests may
+// have recorded the contact MSISDN in a local ("0803...") or international
+// ("+234803...") format, so ownership comparisons run on digit sequences and
+// a national number matches its country-code-prefixed form by suffix.
+func msisdnDigits(value string) string {
+	var digits strings.Builder
+	for _, character := range value {
+		if character >= '0' && character <= '9' {
+			digits.WriteRune(character)
+		}
+	}
+	return digits.String()
+}
+
+// MSISDNMatches reports whether two MSISDNs denote the same subscriber,
+// tolerating format differences: a national number carries a trunk "0"
+// prefix where the international form carries the country code, so the
+// comparison runs on the subscriber suffix with trunk zeros stripped.
+func MSISDNMatches(a, b string) bool {
+	digitsA, digitsB := msisdnDigits(a), msisdnDigits(b)
+	nationalA := strings.TrimLeft(digitsA, "0")
+	nationalB := strings.TrimLeft(digitsB, "0")
+	if len(nationalA) < 7 || len(nationalB) < 7 {
+		return false
+	}
+	return digitsA == digitsB ||
+		strings.HasSuffix(digitsA, nationalB) ||
+		strings.HasSuffix(digitsB, nationalA)
+}
+
+// NormalizeMSISDN validates a carrier-asserted phone number and normalizes it
+// to "+<digits>". Anything malformed is rejected so it can never anchor a
+// session or a booking.
+func NormalizeMSISDN(value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || len(trimmed) > 32 {
+		return "", errors.New("phoneNumber is missing or too long")
+	}
+	for _, character := range trimmed {
+		if !(character >= '0' && character <= '9' || character == '+') {
+			return "", errors.New("phoneNumber carries invalid characters")
+		}
+	}
+	digits := msisdnDigits(trimmed)
+	if len(digits) < 8 || len(digits) > 15 {
+		return "", errors.New("phoneNumber must carry 8 to 15 digits")
+	}
+	return "+" + digits, nil
+}
+
 // Callback handles POST /ussd/callback with Africa's Talking form fields
 // (sessionId, phoneNumber, text). Responses use the CON/END convention.
 func (handler *Handler) Callback(response http.ResponseWriter, request *http.Request) {
@@ -113,10 +170,12 @@ func (handler *Handler) Callback(response http.ResponseWriter, request *http.Req
 		return
 	}
 	sessionID := strings.TrimSpace(request.Form.Get("sessionId"))
-	phoneNumber := strings.TrimSpace(request.Form.Get("phoneNumber"))
 	text := request.Form.Get("text")
-	if sessionID == "" || len(sessionID) > 128 || phoneNumber == "" || len(phoneNumber) > 32 {
-		http.Error(response, "sessionId and phoneNumber are required", http.StatusBadRequest)
+	// The carrier-asserted phone number is the session identity anchor; it is
+	// validated and normalized to E.164 before anything trusts it.
+	phoneNumber, err := NormalizeMSISDN(request.Form.Get("phoneNumber"))
+	if sessionID == "" || len(sessionID) > 128 || err != nil {
+		http.Error(response, "valid sessionId and phoneNumber are required", http.StatusBadRequest)
 		return
 	}
 	reply, err := handler.step(request.Context(), sessionID, phoneNumber, text)
@@ -129,7 +188,12 @@ func (handler *Handler) Callback(response http.ResponseWriter, request *http.Req
 }
 
 func (handler *Handler) step(ctx context.Context, sessionID, phoneNumber, text string) (string, error) {
-	session, err := handler.sessions.Get(ctx, sessionID)
+	// Session state is namespaced by the session MSISDN: a client-chosen
+	// sessionId can only ever collide within the same phone's session space,
+	// never across carriers or phones. The raw carrier sessionId still
+	// anchors idempotent booking/queue request ids.
+	sessionKey := phoneNumber + ":" + sessionID
+	session, err := handler.sessions.Get(ctx, sessionKey)
 	if err != nil {
 		return "", err
 	}
@@ -142,7 +206,7 @@ func (handler *Handler) step(ctx context.Context, sessionID, phoneNumber, text s
 		if len(parts) == 1 || strings.TrimSpace(parts[1]) == "" {
 			return "CON Enter booking ID", nil
 		}
-		found, err := handler.directory.BookingStatus(ctx, strings.TrimSpace(parts[1]))
+		found, err := handler.directory.BookingStatus(ctx, strings.TrimSpace(parts[1]), phoneNumber)
 		if errors.Is(err, booking.ErrNotFound) {
 			return "END Booking not found", nil
 		}
@@ -156,7 +220,7 @@ func (handler *Handler) step(ctx context.Context, sessionID, phoneNumber, text s
 			return "CON Enter slot ID", nil
 		case len(parts) == 2 || strings.TrimSpace(parts[2]) == "":
 			session.PendingSlotID = strings.TrimSpace(parts[1])
-			if err := handler.sessions.Put(ctx, sessionID, session); err != nil {
+			if err := handler.sessions.Put(ctx, sessionKey, session); err != nil {
 				return "", err
 			}
 			return "CON Enter truck plate", nil
@@ -178,7 +242,7 @@ func (handler *Handler) step(ctx context.Context, sessionID, phoneNumber, text s
 			}
 			session.PendingSlotID = ""
 			session.BookedID = reserved.BookingID
-			if err := handler.sessions.Put(ctx, sessionID, session); err != nil {
+			if err := handler.sessions.Put(ctx, sessionKey, session); err != nil {
 				return "", err
 			}
 			return fmt.Sprintf("END Booking confirmed\nID: %s\nStatus: %s", reserved.BookingID, reserved.Status), nil
@@ -189,7 +253,7 @@ func (handler *Handler) step(ctx context.Context, sessionID, phoneNumber, text s
 			return "CON Enter terminal code", nil
 		case len(parts) == 2 || strings.TrimSpace(parts[2]) == "":
 			session.PendingTerminalID = strings.ToUpper(strings.TrimSpace(parts[1]))
-			if err := handler.sessions.Put(ctx, sessionID, session); err != nil {
+			if err := handler.sessions.Put(ctx, sessionKey, session); err != nil {
 				return "", err
 			}
 			return "CON Enter truck plate", nil
@@ -210,7 +274,7 @@ func (handler *Handler) step(ctx context.Context, sessionID, phoneNumber, text s
 			}
 			session.PendingTerminalID = ""
 			session.QueueRequestID = queued.QueueRequestID
-			if err := handler.sessions.Put(ctx, sessionID, session); err != nil {
+			if err := handler.sessions.Put(ctx, sessionKey, session); err != nil {
 				return "", err
 			}
 			position := int64(0)
@@ -227,7 +291,7 @@ func (handler *Handler) step(ctx context.Context, sessionID, phoneNumber, text s
 		if queueRequestID == "" {
 			return "CON Enter queue request ID", nil
 		}
-		found, err := handler.queues.QueueStatus(ctx, queueRequestID)
+		found, err := handler.queues.QueueStatus(ctx, queueRequestID, phoneNumber)
 		if errors.Is(err, queue.ErrNotFound) {
 			return "END Queue request not found", nil
 		}

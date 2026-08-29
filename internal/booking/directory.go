@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
@@ -50,8 +51,41 @@ func NewDirectory(store *Store, principal Principal) (*Directory, error) {
 	return &Directory{store: store, principal: principal}, nil
 }
 
-func (directory *Directory) BookingStatus(ctx context.Context, bookingID string) (Booking, error) {
-	return directory.store.Get(ctx, bookingID)
+// msisdnMatches compares contact MSISDNs on digit sequences so a local
+// ("0803...") record matches its international ("+234803...") form.
+func msisdnMatches(a, b string) bool {
+	digits := func(value string) string {
+		var out []rune
+		for _, character := range value {
+			if character >= '0' && character <= '9' {
+				out = append(out, character)
+			}
+		}
+		return string(out)
+	}
+	digitsA, digitsB := digits(a), digits(b)
+	nationalA := strings.TrimLeft(digitsA, "0")
+	nationalB := strings.TrimLeft(digitsB, "0")
+	if len(nationalA) < 7 || len(nationalB) < 7 {
+		return false
+	}
+	return digitsA == digitsB ||
+		strings.HasSuffix(digitsA, nationalB) ||
+		strings.HasSuffix(digitsB, nationalA)
+}
+
+// BookingStatus is MSISDN-bound: the booking is returned only when its
+// contact MSISDN belongs to the querying session; any other booking answers
+// ErrNotFound so one phone can never enumerate another phone's bookings.
+func (directory *Directory) BookingStatus(ctx context.Context, bookingID, msisdn string) (Booking, error) {
+	found, err := directory.store.Get(ctx, bookingID)
+	if err != nil {
+		return Booking{}, err
+	}
+	if !msisdnMatches(found.TruckerMSISDN, msisdn) {
+		return Booking{}, ErrNotFound
+	}
+	return found, nil
 }
 
 // BookSlotByID creates (idempotently, keyed by requestID) a USSD-channel

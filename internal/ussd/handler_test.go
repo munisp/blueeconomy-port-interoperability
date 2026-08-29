@@ -22,12 +22,12 @@ type fakeDirectory struct {
 	fail     error
 }
 
-func (directory *fakeDirectory) BookingStatus(_ context.Context, bookingID string) (booking.Booking, error) {
+func (directory *fakeDirectory) BookingStatus(_ context.Context, bookingID, msisdn string) (booking.Booking, error) {
 	if directory.fail != nil {
 		return booking.Booking{}, directory.fail
 	}
 	found, ok := directory.bookings[bookingID]
-	if !ok {
+	if !ok || !MSISDNMatches(found.TruckerMSISDN, msisdn) {
 		return booking.Booking{}, booking.ErrNotFound
 	}
 	return found, nil
@@ -78,12 +78,12 @@ func (directory *fakeQueueDirectory) RequestQueueEntry(_ context.Context, termin
 	return created, nil
 }
 
-func (directory *fakeQueueDirectory) QueueStatus(_ context.Context, queueRequestID string) (queue.Request, error) {
+func (directory *fakeQueueDirectory) QueueStatus(_ context.Context, queueRequestID, msisdn string) (queue.Request, error) {
 	if directory.fail != nil {
 		return queue.Request{}, directory.fail
 	}
 	for _, request := range directory.requests {
-		if request.QueueRequestID == queueRequestID {
+		if request.QueueRequestID == queueRequestID && MSISDNMatches(request.TruckerMSISDN, msisdn) {
 			return request, nil
 		}
 	}
@@ -118,7 +118,7 @@ func callback(t *testing.T, handler *Handler, sessionID, phone, text string) (in
 
 func TestUssdMenuAndBookingStatusFlow(t *testing.T) {
 	directory := &fakeDirectory{bookings: map[string]booking.Booking{
-		"BK-001": {BookingID: "BK-001", Status: booking.StatusPaid, TruckPlate: "LAG-123-XY"},
+		"BK-001": {BookingID: "BK-001", Status: booking.StatusPaid, TruckPlate: "LAG-123-XY", TruckerMSISDN: "+2348012345678"},
 	}}
 	queueDirectory := &fakeQueueDirectory{requests: map[string]queue.Request{}}
 	handler, _ := newTestHandler(t, directory, queueDirectory)
@@ -157,8 +157,8 @@ func TestUssdSlotBookingFlowUsesSession(t *testing.T) {
 	if code != http.StatusOK || body != "CON Enter truck plate" {
 		t.Fatalf("plate prompt = %d %q", code, body)
 	}
-	if !redisServer.Exists("ussd:session:sess-2") {
-		t.Fatal("session must be persisted in Redis")
+	if !redisServer.Exists("ussd:session:+2348012345678:sess-2") {
+		t.Fatal("session must be persisted in Redis namespaced by the session MSISDN")
 	}
 	// A mid-session switch to a different slot is rejected.
 	code, body = callback(t, handler, "sess-2", "+2348012345678", "2*SLOT-2*LAG-123-XY")
@@ -226,8 +226,8 @@ func TestUssdQueueEntryFlowIsIdempotentPerSession(t *testing.T) {
 	if code != http.StatusOK || body != "CON Enter truck plate" {
 		t.Fatalf("plate prompt = %d %q", code, body)
 	}
-	if !redisServer.Exists("ussd:session:sess-q1") {
-		t.Fatal("session must be persisted in Redis")
+	if !redisServer.Exists("ussd:session:+2348012345678:sess-q1") {
+		t.Fatal("session must be persisted in Redis namespaced by the session MSISDN")
 	}
 	// A mid-session switch to a different terminal is rejected.
 	code, body = callback(t, handler, "sess-q1", "+2348012345678", "3*OTHER-T1*LAG-123-XY")
@@ -264,10 +264,15 @@ func TestUssdQueuePositionFlow(t *testing.T) {
 	if code != http.StatusOK || !strings.Contains(body, "Position: 7") || !strings.Contains(body, "Status: QUEUED") {
 		t.Fatalf("queue position from session = %d %q", code, body)
 	}
-	// An explicit queue request id works from any session.
-	code, body = callback(t, handler, "sess-q4", "+2348099999999", "4*QR-ussd-q-sess-q3")
+	// An explicit queue request id works from the same MSISDN's other
+	// sessions — but never from another phone (PI-6 binding).
+	code, body = callback(t, handler, "sess-q4", "+2348012345678", "4*QR-ussd-q-sess-q3")
 	if code != http.StatusOK || !strings.Contains(body, "Status: QUEUED") {
 		t.Fatalf("queue position by id = %d %q", code, body)
+	}
+	code, body = callback(t, handler, "sess-q4", "+2348099999999", "4*QR-ussd-q-sess-q3")
+	if code != http.StatusOK || body != "END Queue request not found" {
+		t.Fatalf("cross-MSISDN queue status must be not-found = %d %q", code, body)
 	}
 	code, body = callback(t, handler, "sess-q4", "+2348099999999", "4*QR-UNKNOWN")
 	if code != http.StatusOK || body != "END Queue request not found" {

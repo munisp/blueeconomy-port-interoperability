@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
 )
@@ -34,6 +35,39 @@ func (directory *Directory) RequestQueueEntry(ctx context.Context, terminalID, t
 }
 
 // QueueStatus returns the position and call-up state of a queue request.
-func (directory *Directory) QueueStatus(ctx context.Context, queueRequestID string) (Request, error) {
-	return directory.store.Get(ctx, queueRequestID)
+// msisdnMatches compares contact MSISDNs on digit sequences so a local
+// ("0803...") record matches its international ("+234803...") form.
+func msisdnMatches(a, b string) bool {
+	digits := func(value string) string {
+		var out []rune
+		for _, character := range value {
+			if character >= '0' && character <= '9' {
+				out = append(out, character)
+			}
+		}
+		return string(out)
+	}
+	digitsA, digitsB := digits(a), digits(b)
+	nationalA := strings.TrimLeft(digitsA, "0")
+	nationalB := strings.TrimLeft(digitsB, "0")
+	if len(nationalA) < 7 || len(nationalB) < 7 {
+		return false
+	}
+	return digitsA == digitsB ||
+		strings.HasSuffix(digitsA, nationalB) ||
+		strings.HasSuffix(digitsB, nationalA)
+}
+
+// QueueStatus is MSISDN-bound: the request is returned only when its contact
+// MSISDN belongs to the querying session; any other request answers
+// ErrNotFound so one phone can never enumerate another phone's queue entries.
+func (directory *Directory) QueueStatus(ctx context.Context, queueRequestID, msisdn string) (Request, error) {
+	found, err := directory.store.Get(ctx, queueRequestID)
+	if err != nil {
+		return Request{}, err
+	}
+	if !msisdnMatches(found.TruckerMSISDN, msisdn) {
+		return Request{}, ErrNotFound
+	}
+	return found, nil
 }
