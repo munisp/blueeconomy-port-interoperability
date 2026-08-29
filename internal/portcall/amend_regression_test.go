@@ -77,14 +77,19 @@ func newAmendEnv(t *testing.T) amendEnv {
 // returns the call id and current version.
 func (env amendEnv) clearedCall(t *testing.T, callID string) (string, int64) {
 	t.Helper()
+	// The profile digest must satisfy the sha256:<64 hex> contract enforced
+	// by both RegisterAgencyProfile and the port_agency_profile_versions
+	// CHECK constraint (migration 0005); "abc123" was never a storable
+	// digest and the registration rightly failed closed.
 	if err := env.store.RegisterAgencyProfile(env.ctx, AgencyProfileRegistration{
 		ProfileID: "profile-npa-1", Version: "v1", AgencyCode: "NPA",
-		ProfileSHA256: "abc123", RegisteredBy: "portcall-test-officer", Active: true,
+		ProfileSHA256: "sha256:9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c",
+		RegisteredBy: "portcall-test-officer", Active: true,
 	}); err != nil {
 		t.Fatalf("register agency profile: %v", err)
 	}
 	call, err := env.store.Create(env.ctx, "idem-"+callID, CreateRequest{
-		CallID: callID, VesselIMO: "IMO9074729", PortCode: "NGAPP",
+		CallID: callID, VesselIMO: "9074729", PortCode: "NGAPP",
 		DeclarationRef: "NCS-2026-XYZ789", SubmittedBy: "agent-1",
 		AgencyProfileID: "profile-npa-1", AgencyProfileVersion: "v1",
 	})
@@ -99,7 +104,8 @@ func (env amendEnv) clearedCall(t *testing.T, callID string) (string, int64) {
 	}
 	document, err := env.store.DeclareDocument(env.ctx, callID, DocumentDeclarationRequest{
 		DocumentType: "bill-of-lading", MediaType: "application/pdf",
-		SizeBytes: 1024, SHA256: "deadbeef", DeclaredBy: "agent-1",
+		SizeBytes: 1024, SHA256: "sha256:3b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c",
+		DeclaredBy: "agent-1",
 	})
 	if err != nil {
 		t.Fatalf("declare document: %v", err)

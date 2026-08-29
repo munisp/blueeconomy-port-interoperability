@@ -252,12 +252,12 @@ func (store *Store) declareDocumentTx(ctx context.Context, tx pgx.Tx, claims ten
 		INSERT INTO port_call_documents (document_id, call_id, document_type, media_type, size_bytes, sha256, declared_by, status, created_at, updated_at, tenant_id)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10)
 		ON CONFLICT (call_id, document_type, sha256) DO NOTHING
-		RETURNING document_id, call_id, document_type, media_type, size_bytes, sha256, declared_by, status, created_at, updated_at`,
+		RETURNING document_id, call_id, document_type, media_type, size_bytes, sha256, declared_by, status, created_at, updated_at, version`,
 		id, callID, request.DocumentType, request.MediaType, request.SizeBytes, request.SHA256, request.DeclaredBy, DocumentDeclared, createdAt, claims.TenantID,
-	).Scan(&document.DocumentID, &document.CallID, &document.DocumentType, &document.MediaType, &document.SizeBytes, &document.SHA256, &document.DeclaredBy, &document.Status, &document.CreatedAt, &document.UpdatedAt)
+	).Scan(&document.DocumentID, &document.CallID, &document.DocumentType, &document.MediaType, &document.SizeBytes, &document.SHA256, &document.DeclaredBy, &document.Status, &document.CreatedAt, &document.UpdatedAt, &document.Version)
 	if errors.Is(err, pgx.ErrNoRows) {
-		err = tx.QueryRow(ctx, `SELECT document_id, call_id, document_type, media_type, size_bytes, sha256, declared_by, status, created_at, updated_at FROM port_call_documents WHERE call_id=$1 AND document_type=$2 AND sha256=$3 FOR UPDATE`, callID, request.DocumentType, request.SHA256).
-			Scan(&document.DocumentID, &document.CallID, &document.DocumentType, &document.MediaType, &document.SizeBytes, &document.SHA256, &document.DeclaredBy, &document.Status, &document.CreatedAt, &document.UpdatedAt)
+		err = tx.QueryRow(ctx, `SELECT document_id, call_id, document_type, media_type, size_bytes, sha256, declared_by, status, created_at, updated_at, version FROM port_call_documents WHERE call_id=$1 AND document_type=$2 AND sha256=$3 FOR UPDATE`, callID, request.DocumentType, request.SHA256).
+			Scan(&document.DocumentID, &document.CallID, &document.DocumentType, &document.MediaType, &document.SizeBytes, &document.SHA256, &document.DeclaredBy, &document.Status, &document.CreatedAt, &document.UpdatedAt, &document.Version)
 		if err != nil {
 			return DocumentDeclaration{}, fmt.Errorf("lookup document replay: %w", err)
 		}
