@@ -221,6 +221,26 @@ func (store *Store) getByRequestID(ctx context.Context, tx pgx.Tx, tenantID, req
 		FROM customs_declarations WHERE tenant_id=$1 AND request_id=$2`, tenantID, requestID))
 }
 
+// getSuccessorRevision loads the revision an amendment wrote over the given
+// (now superseded) revision, if any.
+func (store *Store) getSuccessorRevision(ctx context.Context, tx pgx.Tx, tenantID, declarationID string) (Declaration, error) {
+	return scanDeclaration(tx.QueryRow(ctx, `SELECT `+declarationColumns+`
+		FROM customs_declarations WHERE tenant_id=$1 AND supersedes_id=$2
+		ORDER BY revision DESC LIMIT 1`, tenantID, declarationID))
+}
+
+// derivedAmendmentRequestID builds the stored idempotency key for an
+// amendment revision that reuses the head revision's request id. The result
+// always satisfies the request_id length CHECK (8..128 chars).
+func derivedAmendmentRequestID(requestID string, revision int) string {
+	suffix := fmt.Sprintf("#rev%d", revision)
+	base := requestID
+	if len(base)+len(suffix) > 128 {
+		base = base[:128-len(suffix)]
+	}
+	return base + suffix
+}
+
 // Get loads one declaration revision by id.
 func (store *Store) Get(ctx context.Context, declarationID string) (Declaration, error) {
 	var declaration Declaration
@@ -651,13 +671,21 @@ func (store *Store) Amend(ctx context.Context, declarationID string, request Cre
 		if head.DeclarationRef != request.DeclarationRef {
 			return fmt.Errorf("%w: amendments keep the declaration ref", ErrDeclarationInvalid)
 		}
-		// Idempotent replay: the amendment revision already exists.
-		if head.RequestID != request.RequestID {
-			if existing, lookupErr := store.getByRequestID(ctx, tx, claims.TenantID, request.RequestID); lookupErr == nil {
-				if existing.SupersedesID != nil && *existing.SupersedesID == declarationID {
-					amended = existing
+		// Idempotent replay: the amendment revision already exists. An
+		// amendment may legitimately reuse the head revision's request id;
+		// that revision is then stored under a derived idempotency key (see
+		// below) and a replay is detected via the head's successor revision.
+		if existing, lookupErr := store.getByRequestID(ctx, tx, claims.TenantID, request.RequestID); lookupErr == nil {
+			switch {
+			case existing.SupersedesID != nil && *existing.SupersedesID == declarationID:
+				amended = existing
+				return nil
+			case existing.DeclarationID == declarationID:
+				if successor, succErr := store.getSuccessorRevision(ctx, tx, claims.TenantID, declarationID); succErr == nil {
+					amended = successor
 					return nil
 				}
+			default:
 				return ErrIdempotencyConflict
 			}
 		}
@@ -674,6 +702,14 @@ func (store *Store) Amend(ctx context.Context, declarationID string, request Cre
 			now, declarationID, head.Status, expectedVersion); err != nil {
 			return fmt.Errorf("supersede declaration: %w", err)
 		}
+		// (tenant_id, request_id) is unique across every revision, so an
+		// amendment that reuses the head's request id is stored under a
+		// derived idempotency key; replays are caught by the successor
+		// lookup above.
+		amendmentRequestID := request.RequestID
+		if head.RequestID == request.RequestID {
+			amendmentRequestID = derivedAmendmentRequestID(request.RequestID, head.Revision+1)
+		}
 		created, err := scanDeclaration(tx.QueryRow(ctx, `
 			INSERT INTO customs_declarations (
 				declaration_id, tenant_id, request_id, declaration_ref, ucr, revision, supersedes_id,
@@ -684,7 +720,7 @@ func (store *Store) Amend(ctx context.Context, declarationID string, request Cre
 				levy_bps, excise_bps, created_at, updated_at, version
 			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'DRAFT',$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$29,1)
 			RETURNING `+declarationColumns,
-			uuid.New(), claims.TenantID, request.RequestID, request.DeclarationRef, nilIfEmpty(request.UCR),
+			uuid.New(), claims.TenantID, amendmentRequestID, request.DeclarationRef, nilIfEmpty(request.UCR),
 			head.Revision+1, declarationID, principal.ID, string(request.DeclarationType), hsCode,
 			request.GoodsDescription, request.CountryOfOrigin, nilIfEmpty(request.CountryOfDestination),
 			request.PortOfEntry, request.GrossWeightKg, request.NetWeightKg, request.NumberOfPackages,

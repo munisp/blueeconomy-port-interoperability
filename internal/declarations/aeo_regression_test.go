@@ -80,10 +80,7 @@ func TestClientClaimedAEOIsIgnoredWithoutRegistry(t *testing.T) {
 		if event["_event_type"] != EventRiskAssessed {
 			continue
 		}
-		extensions, _ := event["extensions"].(map[string]any)
-		rawReasons, _ := extensions["lane-reasons"].(string)
-		var reasons []string
-		_ = json.Unmarshal([]byte(rawReasons), &reasons)
+		reasons := laneReasons(t, event)
 		for _, reason := range reasons {
 			if strings.Contains(reason, "AEO_UNVERIFIED") {
 				foundAEOUnverified = true
@@ -99,6 +96,34 @@ func TestClientClaimedAEOIsIgnoredWithoutRegistry(t *testing.T) {
 	if _, _, err := env.store.ClearanceCertificate(env.ctx, assessed.DeclarationID); err == nil {
 		t.Fatal("no clearance certificate may exist for an unverified-AEO lane")
 	}
+}
+
+// laneReasons extracts the lane-reasons extension from a FHIR-enveloped
+// event. Event extensions live on the FHIR Basic resource inside the
+// canonical `fhir` bundle (see events.Message and assertEnvelopeV1); there
+// is no top-level extensions key on the envelope.
+func laneReasons(t *testing.T, event map[string]any) []string {
+	t.Helper()
+	fhir, _ := event["fhir"].(map[string]any)
+	entries, _ := fhir["entry"].([]any)
+	for _, entry := range entries {
+		resource, _ := entry.(map[string]any)["resource"].(map[string]any)
+		extensions, _ := resource["extension"].([]any)
+		for _, extension := range extensions {
+			ext, _ := extension.(map[string]any)
+			url, _ := ext["url"].(string)
+			if !strings.HasSuffix(url, "/lane-reasons") {
+				continue
+			}
+			raw, _ := ext["valueString"].(string)
+			var reasons []string
+			if err := json.Unmarshal([]byte(raw), &reasons); err != nil {
+				t.Fatalf("decode lane-reasons extension: %v", err)
+			}
+			return reasons
+		}
+	}
+	return nil
 }
 
 // PI-7 regression (DB-gated): a registry-verified AEO trader still earns the
