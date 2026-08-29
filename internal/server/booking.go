@@ -42,7 +42,12 @@ func principalOf(request *http.Request, role string) booking.Principal {
 	return booking.Principal{ID: claims.Subject, Role: role}
 }
 
+// createTerminal registers a port terminal. Terminal administration is bound
+// to the verified port-operator-admin role; any other tenant token is denied.
 func (server *Server) createTerminal(response http.ResponseWriter, request *http.Request) {
+	if _, ok := requireRole(response, request, RolePortOperatorAdmin); !ok {
+		return
+	}
 	var input struct {
 		TerminalID     string `json:"terminal_id"`
 		PortCode       string `json:"port_code"`
@@ -62,7 +67,12 @@ func (server *Server) createTerminal(response http.ResponseWriter, request *http
 	writeJSON(response, http.StatusCreated, map[string]string{"terminal_id": input.TerminalID, "status": "registered"})
 }
 
+// createSlot opens a terminal slot window. Slot administration is bound to
+// the verified port-operator-admin role; any other tenant token is denied.
 func (server *Server) createSlot(response http.ResponseWriter, request *http.Request) {
+	if _, ok := requireRole(response, request, RolePortOperatorAdmin); !ok {
+		return
+	}
 	var input struct {
 		TerminalID string    `json:"terminal_id"`
 		StartsAt   time.Time `json:"starts_at"`
@@ -340,24 +350,29 @@ func (server *Server) cancelBooking(response http.ResponseWriter, request *http.
 
 // gateScan is the gate scan controller: the scan is validated against booking
 // state, slot window and payment receipt before any GATE_APPROVED transition.
+// The scanning officer's identity comes from the verified token claims only;
+// a body-supplied scanned_by is rejected as an unknown field.
 func (server *Server) gateScan(response http.ResponseWriter, request *http.Request) {
+	claims, ok := claimsOf(response, request)
+	if !ok {
+		return
+	}
 	var input struct {
 		BookingID string     `json:"booking_id"`
 		GateID    string     `json:"gate_id"`
-		ScannedBy string     `json:"scanned_by"`
 		ScannedAt *time.Time `json:"scanned_at,omitempty"`
 	}
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil || input.BookingID == "" || input.GateID == "" || input.ScannedBy == "" {
-		writeError(response, http.StatusBadRequest, "booking_id, gate_id and scanned_by are required")
+	if err := decoder.Decode(&input); err != nil || input.BookingID == "" || input.GateID == "" {
+		writeError(response, http.StatusBadRequest, "booking_id and gate_id are required")
 		return
 	}
 	scannedAt := time.Now().UTC()
 	if input.ScannedAt != nil {
 		scannedAt = *input.ScannedAt
 	}
-	scan, updated, err := server.bookings.RecordGateScan(request.Context(), input.BookingID, input.GateID, input.ScannedBy, scannedAt, principalOf(request, "gate-officer"))
+	scan, updated, err := server.bookings.RecordGateScan(request.Context(), input.BookingID, input.GateID, claims.Subject, scannedAt, booking.Principal{ID: claims.Subject, Role: RoleGateOfficer})
 	if err != nil {
 		writeBookingError(response, err)
 		return

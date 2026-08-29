@@ -50,3 +50,51 @@ func TestConfirmPaymentRequiresPaymentSwitchRole(t *testing.T) {
 		}
 	}
 }
+
+// PI-4 regression: terminal and slot administration are bound to the verified
+// port-operator-admin role. The role gate runs before any storage.
+func TestTerminalAndSlotAdministrationRequireOperatorAdminRole(t *testing.T) {
+	handler := newWiredHandler(t)
+	for _, path := range []string{"/v1/terminals", "/v1/slots"} {
+		for name, token := range map[string]string{
+			"role-less tenant user": mintToken(t, "tenant-user"),
+			"trucker":               mintToken(t, "trucker-1", RoleTrucker),
+			"gate officer":          mintToken(t, "gate-1", RoleGateOfficer),
+		} {
+			request := loopbackRequest(http.MethodPost, path, `{}`)
+			request.Header.Set("Authorization", "Bearer "+token)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("%s %s: status = %d, want 403", name, path, response.Code)
+			}
+		}
+	}
+	// A token carrying the role passes the gate (fails later on validation).
+	request := loopbackRequest(http.MethodPost, "/v1/terminals", `{"terminal_id":"BAD id"}`)
+	request.Header.Set("Authorization", "Bearer "+mintToken(t, "ops-1", RolePortOperatorAdmin))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code == http.StatusForbidden || response.Code == http.StatusUnauthorized {
+		t.Fatalf("operator admin must pass the role gate: status = %d", response.Code)
+	}
+}
+
+// PI-4 regression: body-supplied actor identities are rejected outright.
+func TestBodySuppliedActorFieldsAreRejected(t *testing.T) {
+	handler := newWiredHandler(t)
+	cases := map[string]string{
+		"/v1/gate/scans":                       `{"booking_id":"b","gate_id":"GATE-A","scanned_by":"mallory"}`,
+		"/v1/port-calls/call-1/clearance":      `{"expected_version":1,"decision":"APPROVED","reason":"ok","decided_by":"mallory"}`,
+		"/v1/bookings/some-id/payment-intents": `{"request_id":"12345678","expected_version":1,"actor":"mallory"}`,
+	}
+	for path, body := range cases {
+		request := loopbackRequest(http.MethodPost, path, body)
+		request.Header.Set("Authorization", "Bearer "+mintToken(t, "officer-1", RoleGateOfficer, RoleNPAOfficer))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("%s with body actor field: status = %d, want 400", path, response.Code)
+		}
+	}
+}

@@ -312,11 +312,13 @@ func (server *Server) declareDocument(response http.ResponseWriter, request *htt
 	writeJSON(response, http.StatusCreated, document)
 }
 
+// clearanceRequest carries no actor identity: the deciding officer is always
+// the verified token subject. A body-supplied decided_by is rejected as an
+// unknown field.
 type clearanceRequest struct {
 	ExpectedVersion int64                      `json:"expected_version"`
 	Decision        portcall.ClearanceDecision `json:"decision"`
 	Reason          string                     `json:"reason"`
-	DecidedBy       string                     `json:"decided_by"`
 }
 
 func (server *Server) reviewDocument(response http.ResponseWriter, request *http.Request, callID string) {
@@ -360,6 +362,10 @@ func (server *Server) supersedeDocument(response http.ResponseWriter, request *h
 }
 
 func (server *Server) amendClearance(response http.ResponseWriter, request *http.Request, callID string) {
+	claims, ok := claimsOf(response, request)
+	if !ok {
+		return
+	}
 	var input portcall.ClearanceAmendmentRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -367,6 +373,9 @@ func (server *Server) amendClearance(response http.ResponseWriter, request *http
 		writeError(response, http.StatusBadRequest, "invalid clearance amendment JSON")
 		return
 	}
+	// The amending officer is the verified token subject; any body-supplied
+	// amended_by is overridden, never trusted.
+	input.AmendedBy = claims.Subject
 	clearance, err := server.store.AmendClearance(request.Context(), callID, input)
 	if err != nil {
 		writePortCallError(response, err)
@@ -376,6 +385,10 @@ func (server *Server) amendClearance(response http.ResponseWriter, request *http
 }
 
 func (server *Server) decideClearance(response http.ResponseWriter, request *http.Request, callID string) {
+	claims, ok := claimsOf(response, request)
+	if !ok {
+		return
+	}
 	var input clearanceRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -383,7 +396,7 @@ func (server *Server) decideClearance(response http.ResponseWriter, request *htt
 		writeError(response, http.StatusBadRequest, "expected_version must be a positive integer")
 		return
 	}
-	clearance, err := server.store.DecideClearance(request.Context(), callID, input.ExpectedVersion, input.Decision, input.Reason, input.DecidedBy)
+	clearance, err := server.store.DecideClearance(request.Context(), callID, input.ExpectedVersion, input.Decision, input.Reason, claims.Subject)
 	if err != nil {
 		writePortCallError(response, err)
 		return

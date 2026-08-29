@@ -71,20 +71,22 @@ container_id=$("${docker_prefix[@]}" ps --filter name=port-interoperability-post
 # Mint a gateway tenant token (HS256, the shared-secret edge credential).
 mint_token() {
   local subject=$1
-  python3 - "$TENANT_GATEWAY_KEY" "$subject" <<'PY'
+  shift
+  python3 - "$TENANT_GATEWAY_KEY" "$subject" "$@" <<'PY'
 import base64, hashlib, hmac, json, sys, time
 key, subject = sys.argv[1].encode(), sys.argv[2]
+roles = sys.argv[3:]
 b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b'=').decode()
 head = b64(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(',', ':')).encode())
 claims = {"iss": "gateway.local", "aud": "s1-port-interoperability",
           "tenant_id": "tenant-integration", "sub": subject,
-          "exp": int(time.time()) + 3600}
+          "exp": int(time.time()) + 3600, "roles": roles}
 payload = b64(json.dumps(claims, separators=(',', ':')).encode())
 sig = b64(hmac.new(key, f"{head}.{payload}".encode(), hashlib.sha256).digest())
 print(f"{head}.{payload}.{sig}")
 PY
 }
-token_admin=$(mint_token integration-admin)
+token_admin=$(mint_token integration-admin port-operator-admin)
 token_agent=$(mint_token integration-agent)
 token_checker=$(mint_token integration-checker)
 token_supervisor=$(mint_token integration-supervisor)
@@ -169,7 +171,7 @@ fi
 document_id=$(printf '%s' "$document" | python3 -c 'import json,sys; print(json.load(sys.stdin)["document_id"])')
 if curl --silent --show-error -o /tmp/clearance-before-document-review.json -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/port-calls/call-001/clearance \
   -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-checker' -H "Authorization: Bearer $token_checker" \
-  --data '{"expected_version":3,"decision":"APPROVED","reason":"attempt before document verification","decided_by":"integration-checker"}' | grep -q '^422$'; then :; else
+  --data '{"expected_version":3,"decision":"APPROVED","reason":"attempt before document verification"}' | grep -q '^422$'; then :; else
   echo 'clearance approval before document verification was not rejected' >&2
   exit 1
 fi
@@ -186,13 +188,13 @@ supersession=$(api POST /v1/port-calls/call-001/documents/supersede "$token_supe
 printf '%s' "$supersession" | grep -q '"status":"superseded"'
 inactive_existing='{"profile_id":"npa-lagos","version":"2026-08-16","agency_code":"NPA","profile_sha256":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","registered_by":"integration-admin","active":false}'
 api POST /v1/agency-profiles "$token_admin" --data "$inactive_existing" >/dev/null
-if curl --silent --show-error -o /tmp/clearance-inactive-profile.json -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/port-calls/call-001/clearance -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-checker' -H "Authorization: Bearer $token_checker" --data '{"expected_version":3,"decision":"APPROVED","reason":"profile inactive enforcement","decided_by":"integration-checker"}' | grep -q '^422$'; then :; else
+if curl --silent --show-error -o /tmp/clearance-inactive-profile.json -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/port-calls/call-001/clearance -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-checker' -H "Authorization: Bearer $token_checker" --data '{"expected_version":3,"decision":"APPROVED","reason":"profile inactive enforcement"}' | grep -q '^422$'; then :; else
   echo 'clearance did not reject inactive agency profile' >&2
   exit 1
 fi
 api POST /v1/agency-profiles "$token_admin" --data "$profile" >/dev/null
 clearance=$(api POST /v1/port-calls/call-001/clearance "$token_checker" \
-  --data '{"expected_version":3,"decision":"APPROVED","reason":"all required declaration evidence verified","decided_by":"integration-checker"}')
+  --data '{"expected_version":3,"decision":"APPROVED","reason":"all required declaration evidence verified"}')
 printf '%s' "$clearance" | grep -q '"decision":"APPROVED"'
 printf '%s' "$clearance" | grep -q '"call_version":4'
 amendment=$(api POST /v1/port-calls/call-001/clearance/amend "$token_amender" --data '{"expected_version":4,"decision":"REJECTED","reason":"new authority instruction","amended_by":"integration-amender"}')
@@ -229,7 +231,7 @@ printf '%s' "$reconciled" | grep -q '"status":"RECONCILIATION_REQUIRED"'
 # Gate scan of an unpaid booking is denied.
 if curl --silent --show-error -o /tmp/gate-unpaid.json -w '%{http_code}' -X POST http://127.0.0.1:18080/v1/gate/scans \
   -H 'Content-Type: application/json' -H 'X-Trusted-Proxy: loopback' -H 'X-Authenticated-Principal: integration-gate' -H "Authorization: Bearer $token_agent" \
-  --data "{\"booking_id\":\"$booking_one_id\",\"gate_id\":\"GATE-A\",\"scanned_by\":\"integration-gate\"}" | grep -q '^403$'; then :; else
+  --data "{\"booking_id\":\"$booking_one_id\",\"gate_id\":\"GATE-A\"}" | grep -q '^403$'; then :; else
   echo 'gate scan of unpaid booking was not denied' >&2
   exit 1
 fi
