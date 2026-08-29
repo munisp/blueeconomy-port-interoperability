@@ -58,6 +58,12 @@ func run() error {
 	if err != nil || sweepSeconds < 5 {
 		return errors.New("QUEUE_SWEEP_INTERVAL_SECONDS must be an integer >= 5")
 	}
+	// QUEUE_STALE_AFTER_HOURS bounds how long a QUEUED entry may wait before
+	// the sweeper expires it; default 72h matches a long port weekend.
+	staleHours, err := strconv.Atoi(defaultEnv("QUEUE_STALE_AFTER_HOURS", "72"))
+	if err != nil || staleHours < 1 {
+		return errors.New("QUEUE_STALE_AFTER_HOURS must be a positive integer")
+	}
 
 	settlement, err := ledger.NewTigerBeetle(clusterID, addresses)
 	if err != nil {
@@ -137,7 +143,7 @@ func run() error {
 	bookingWorker.RegisterActivity(activities)
 	bookingWorker.RegisterActivity(callUpActivities)
 
-	sweeper, err := queue.NewSweeper(pool, queueStore, callUps, tenantID)
+	sweeper, err := queue.NewSweeper(pool, queueStore, callUps, tenantID, time.Duration(staleHours)*time.Hour)
 	if err != nil {
 		return fmt.Errorf("configure call-up sweeper: %w", err)
 	}

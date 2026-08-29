@@ -171,14 +171,17 @@ func (recording *recordingCallUps) startedFor(tenantID string) int {
 }
 
 func TestNewSweeperFailsClosedOnMissingDependencies(t *testing.T) {
-	if _, err := NewSweeper(nil, &Store{}, &recordingCallUps{}, ""); err == nil {
+	if _, err := NewSweeper(nil, &Store{}, &recordingCallUps{}, "", time.Hour); err == nil {
 		t.Fatal("sweeper without a database pool must fail closed")
 	}
-	if _, err := NewSweeper(&pgxpool.Pool{}, nil, &recordingCallUps{}, ""); err == nil {
+	if _, err := NewSweeper(&pgxpool.Pool{}, nil, &recordingCallUps{}, "", time.Hour); err == nil {
 		t.Fatal("sweeper without a queue store must fail closed")
 	}
-	if _, err := NewSweeper(&pgxpool.Pool{}, &Store{}, nil, ""); err == nil {
+	if _, err := NewSweeper(&pgxpool.Pool{}, &Store{}, nil, "", time.Hour); err == nil {
 		t.Fatal("sweeper without a call-up orchestrator must fail closed")
+	}
+	if _, err := NewSweeper(&pgxpool.Pool{}, &Store{}, &recordingCallUps{}, "", 0); err == nil {
+		t.Fatal("sweeper without a positive stale-entry cutoff must fail closed")
 	}
 }
 
@@ -195,7 +198,7 @@ func TestSweeperSweepsEveryActiveTenant(t *testing.T) {
 	requestOff := env.seedQueuedRequest(t, boundOff, "sweeper-idem-off")
 
 	callUps := &recordingCallUps{}
-	sweeper, err := NewSweeper(env.pool, env.store, callUps, "")
+	sweeper, err := NewSweeper(env.pool, env.store, callUps, "", 72*time.Hour)
 	if err != nil {
 		t.Fatalf("build sweeper: %v", err)
 	}
@@ -229,7 +232,7 @@ func TestSweeperHonoursSingleTenantRestriction(t *testing.T) {
 	requestB := env.seedQueuedRequest(t, boundB, "sweeper-only-b")
 
 	callUps := &recordingCallUps{}
-	sweeper, err := NewSweeper(env.pool, env.store, callUps, tenantB)
+	sweeper, err := NewSweeper(env.pool, env.store, callUps, tenantB, 72*time.Hour)
 	if err != nil {
 		t.Fatalf("build sweeper: %v", err)
 	}
@@ -264,7 +267,7 @@ func TestSweeperIsolatesTenantFailures(t *testing.T) {
 
 	before := failureCount(broken)
 	callUps := &recordingCallUps{}
-	sweeper, err := NewSweeper(env.pool, env.store, callUps, "")
+	sweeper, err := NewSweeper(env.pool, env.store, callUps, "", 72*time.Hour)
 	if err != nil {
 		t.Fatalf("build sweeper: %v", err)
 	}
@@ -290,4 +293,46 @@ func failureCount(tenantID string) int64 {
 		return 0
 	}
 	return value.Value()
+}
+
+// PI-8 regression: the sweeper retires QUEUED entries past the stale cutoff
+// into EXPIRED (releasing them from the waiting list) while fresh entries
+// stay queued.
+func TestSweeperExpiresStaleQueuedEntries(t *testing.T) {
+	env := newSweeperEnv(t)
+	tenantID := fmt.Sprintf("tenant-stale-%d", time.Now().UnixNano()%1_000_000)
+	bound := env.addTenant(t, tenantID, true)
+	stale := env.seedQueuedRequest(t, bound, "stale-entry-1")
+	fresh := env.seedQueuedRequest(t, bound, "fresh-entry-1")
+	if _, err := env.pool.Exec(env.ctx,
+		`UPDATE truck_queue_requests SET created_at = now() - interval '2 hours' WHERE queue_request_id=$1`,
+		stale.QueueRequestID); err != nil {
+		t.Fatalf("backdate stale entry: %v", err)
+	}
+
+	callUps := &recordingCallUps{}
+	sweeper, err := NewSweeper(env.pool, env.store, callUps, "", time.Hour)
+	if err != nil {
+		t.Fatalf("build sweeper: %v", err)
+	}
+	if err := sweeper.SweepOnce(env.ctx); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if status := env.requestStatus(t, tenantID, stale.QueueRequestID); status != string(StatusExpired) {
+		t.Fatalf("stale entry status = %s, want EXPIRED", status)
+	}
+	if status := env.requestStatus(t, tenantID, fresh.QueueRequestID); status != string(StatusQueued) {
+		t.Fatalf("fresh entry status = %s, want QUEUED", status)
+	}
+	// The expired entry leaves the terminal waiting list (capacity/positions
+	// free up for the trucks still waiting).
+	listed, err := env.store.ListTerminal(bound, stale.TerminalID)
+	if err != nil {
+		t.Fatalf("list terminal: %v", err)
+	}
+	for _, request := range listed {
+		if request.QueueRequestID == stale.QueueRequestID && request.Status != StatusExpired {
+			t.Fatalf("stale entry must not hold a live queue position: %#v", request)
+		}
+	}
 }

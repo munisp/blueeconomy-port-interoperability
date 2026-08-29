@@ -29,15 +29,23 @@ type Sweeper struct {
 	// onlyTenant optionally restricts the sweep to a single tenant
 	// (WORKER_TENANT_ID); empty sweeps every active tenant.
 	onlyTenant string
+	// staleAfter is the maximum age of a QUEUED entry before the sweep
+	// expires it; it must be positive so dead queue entries cannot park a
+	// terminal's waiting list forever.
+	staleAfter time.Duration
 }
 
 // NewSweeper wires the multi-tenant call-up sweeper; every dependency is
-// mandatory. onlyTenant may be empty (sweep all active tenants).
-func NewSweeper(pool *pgxpool.Pool, store *Store, callUps CallUpOrchestrator, onlyTenant string) (*Sweeper, error) {
+// mandatory. onlyTenant may be empty (sweep all active tenants). staleAfter
+// bounds how long a QUEUED entry may wait before ExpireStale retires it.
+func NewSweeper(pool *pgxpool.Pool, store *Store, callUps CallUpOrchestrator, onlyTenant string, staleAfter time.Duration) (*Sweeper, error) {
 	if pool == nil || store == nil || callUps == nil {
 		return nil, errors.New("call-up sweeper requires a database pool, a queue store and a call-up orchestrator")
 	}
-	return &Sweeper{pool: pool, store: store, callUps: callUps, onlyTenant: onlyTenant}, nil
+	if staleAfter <= 0 {
+		return nil, errors.New("call-up sweeper requires a positive stale-entry cutoff")
+	}
+	return &Sweeper{pool: pool, store: store, callUps: callUps, onlyTenant: onlyTenant, staleAfter: staleAfter}, nil
 }
 
 // SweepOnce runs one reconcile + workflow-restart cycle across every active
@@ -100,6 +108,12 @@ func (sweeper *Sweeper) sweepTenant(ctx context.Context, tenantID string) error 
 	}
 	if _, err := sweeper.store.ReconcileCallUps(bound, principal); err != nil {
 		return fmt.Errorf("reconcile call-ups: %w", err)
+	}
+	// Retire queue entries that waited past the stale cutoff: a QUEUED entry
+	// never held call-up capacity, but leaving it forever parks the waiting
+	// list and misleads position reporting.
+	if _, err := sweeper.store.ExpireStale(bound, time.Now().Add(-sweeper.staleAfter), principal); err != nil {
+		return fmt.Errorf("expire stale queue entries: %w", err)
 	}
 	active, err := sweeper.store.ListActiveCallUps(bound)
 	if err != nil {
