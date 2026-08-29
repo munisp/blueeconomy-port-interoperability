@@ -411,7 +411,8 @@ func writeBookingError(response http.ResponseWriter, err error) {
 	case errors.Is(err, booking.ErrNotFound):
 		writeError(response, http.StatusNotFound, err.Error())
 	case errors.Is(err, booking.ErrIdempotencyConflict), errors.Is(err, booking.ErrOptimisticConflict),
-		errors.Is(err, booking.ErrInvalidTransition), errors.Is(err, booking.ErrSlotUnavailable):
+		errors.Is(err, booking.ErrInvalidTransition), errors.Is(err, booking.ErrSlotUnavailable),
+		errors.Is(err, booking.ErrPaymentReceiptReuse):
 		writeError(response, http.StatusConflict, err.Error())
 	case errors.Is(err, booking.ErrSlotWindow), errors.Is(err, booking.ErrPaymentInvalid):
 		writeError(response, http.StatusUnprocessableEntity, err.Error())
