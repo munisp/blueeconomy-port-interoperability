@@ -25,7 +25,29 @@ const (
 	TopicQueue   = "ports.queue.v1"
 
 	TopicDeclarations = "trade.declarations.v1"
+
+	// TopicOffshore carries offshore terminal-call (SBM/SPM) lifecycle events.
+	TopicOffshore = "ports.offshore.v1"
+	// TopicManifests carries API/BRI passenger-manifest ingest outcomes.
+	TopicManifests = "ports.manifests.v1"
+	// TopicCruise carries cruise call lifecycle and excursion events.
+	TopicCruise = "ports.cruise.v1"
+	// TopicRevenueAssessments carries deterministic fee/dues assessments to
+	// the financial-controls revenue contract (assessment → settlement →
+	// reconciliation chain).
+	TopicRevenueAssessments = "finance.revenue-assessments.v1"
 )
+
+// validTopic reports whether the topic is a platform v1 contract topic.
+func validTopic(topic string) bool {
+	switch topic {
+	case TopicBooking, TopicGate, TopicQueue, TopicDeclarations,
+		TopicOffshore, TopicManifests, TopicCruise, TopicRevenueAssessments:
+		return true
+	default:
+		return false
+	}
+}
 
 // Provenance binds an event to the acting principal and the integrity chain.
 // The signature key is the canonical `signature`, matching every other
@@ -93,7 +115,7 @@ func Message(eventType, topic, correlationID, subjectID string, payloadJSON json
 	if signer == nil {
 		return Envelope{}, errors.New("an envelope signer is required")
 	}
-	if strings.TrimSpace(eventType) == "" || (topic != TopicBooking && topic != TopicGate && topic != TopicQueue && topic != TopicDeclarations) {
+	if strings.TrimSpace(eventType) == "" || !validTopic(topic) {
 		return Envelope{}, errors.New("event type and a platform v1 topic are required")
 	}
 	if strings.TrimSpace(correlationID) == "" || strings.TrimSpace(subjectID) == "" {

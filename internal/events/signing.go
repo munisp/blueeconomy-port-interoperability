@@ -93,6 +93,38 @@ func NewSigner(privateKey ed25519.PrivateKey, keyEpoch string) (*Signer, error) 
 	return &Signer{privateKey: privateKey, kid: keyIDPrefix + keyEpoch}, nil
 }
 
+// NewSignerWithKeyID builds a signer carrying an explicit JWS kid. It exists
+// for external authority keys (e.g. an API/BRI manifest authority whose kid
+// space is not the port-interoperability rotation epoch); platform producers
+// keep using NewSigner. The kid must be canonical printable text of at most
+// 128 characters.
+func NewSignerWithKeyID(privateKey ed25519.PrivateKey, kid string) (*Signer, error) {
+	if len(privateKey) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("envelope signing private key must be %d bytes", ed25519.PrivateKeySize)
+	}
+	if public, ok := privateKey.Public().(ed25519.PublicKey); !ok || len(public) != ed25519.PublicKeySize {
+		return nil, errors.New("envelope signing private key has no valid public half")
+	}
+	if !validKeyID(kid) {
+		return nil, errors.New("JWS kid must be canonical printable text of at most 128 characters")
+	}
+	return &Signer{privateKey: privateKey, kid: kid}, nil
+}
+
+// validKeyID restricts kids to printable ASCII without leading/trailing
+// whitespace so header rendering stays canonical.
+func validKeyID(kid string) bool {
+	if kid == "" || len(kid) > 128 || strings.TrimSpace(kid) != kid {
+		return false
+	}
+	for _, character := range kid {
+		if character < 0x21 || character > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 // SignerFromEnv loads the signer from SigningKeyEnv and SigningKeyEpochEnv.
 // It fails closed when either variable is absent or invalid — an unsigned
 // event pipeline must never start.
@@ -191,6 +223,17 @@ func (signer *Signer) Sign(envelope Envelope) (string, error) {
 // alg=EdDSA with a port-interoperability kid, the payload must re-canonicalize
 // to the exact signed bytes, and the Ed25519 signature must verify.
 func Verify(envelope Envelope, publicKey ed25519.PublicKey) error {
+	return VerifyWithKeyIDPrefix(envelope, publicKey, keyIDPrefix)
+}
+
+// VerifyWithKeyIDPrefix is Verify for external authority keys: the JWS kid
+// must carry the configured authority prefix (e.g. "manifest-authority-")
+// instead of the port-interoperability rotation prefix. An empty prefix
+// fails closed.
+func VerifyWithKeyIDPrefix(envelope Envelope, publicKey ed25519.PublicKey, kidPrefix string) error {
+	if kidPrefix == "" {
+		return errors.New("a JWS kid prefix is required (fail closed)")
+	}
 	if len(publicKey) != ed25519.PublicKeySize {
 		return errors.New("verification public key must be a valid Ed25519 key")
 	}
@@ -212,8 +255,8 @@ func Verify(envelope Envelope, publicKey ed25519.PublicKey) error {
 	if parsed.Algorithm != signingAlgorithm {
 		return fmt.Errorf("JWS alg %q is not %q", parsed.Algorithm, signingAlgorithm)
 	}
-	if !strings.HasPrefix(parsed.KeyID, keyIDPrefix) {
-		return fmt.Errorf("JWS kid %q is not a port-interoperability key", parsed.KeyID)
+	if !strings.HasPrefix(parsed.KeyID, kidPrefix) {
+		return fmt.Errorf("JWS kid %q does not carry the required %q prefix", parsed.KeyID, kidPrefix)
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
