@@ -304,6 +304,221 @@ paths:
         '404': {description: Declaration not found.}
         '409': {description: Version conflict or the declaration is not amendable.}
         '422': {description: Amended content failed validation.}
+  /v1/tariff-schedules:
+    post:
+      operationId: registerTariffSchedule
+      description: >-
+        Registers a versioned, effective-dated tariff schedule (rates as
+        DATA, each with a legal anchor) for OFFSHORE_TERMINAL or CRUISE_DUES
+        assessments. Schedules are immutable; rate changes are a new
+        schedule_id. Requires the port-operator-admin role.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, description: Tariff schedule with rules; registered_by is pinned server-side to the verified caller.}
+      responses:
+        '201': {description: Schedule registered.}
+        '400': {description: Invalid schedule shape.}
+        '401': {description: Missing verified local edge identity.}
+        '403': {description: port-operator-admin role required.}
+        '422': {description: Schedule conflicts with an immutable retained schedule.}
+  /v1/offshore-calls:
+    post:
+      operationId: createOffshoreCall
+      description: >-
+        Registers a tanker call at an offshore (SBM/SPM/FPSO) terminal with
+        its mooring window. Idempotent on the Idempotency-Key header.
+        Requires the npa-officer role.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, description: Vessel IMO/name, terminal code/kind, buoy, agency, tonnages, mooring window.}
+      responses:
+        '201': {description: Offshore call registered (NOMINATED).}
+        '400': {description: Invalid request or missing Idempotency-Key.}
+        '403': {description: npa-officer role required.}
+        '409': {description: Idempotency key conflicts with a retained call.}
+  /v1/offshore-calls/{call_id}:
+    get:
+      operationId: getOffshoreCall
+      description: Returns one offshore terminal call.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '200': {description: The offshore call.}
+        '404': {description: Not found.}
+  /v1/offshore-calls/{call_id}/transitions:
+    post:
+      operationId: transitionOffshoreCall
+      description: >-
+        Advances the mooring-master workflow (NOMINATED → APPROACH_CLEARED →
+        MOORED → HOSE_CONNECTED → LOADING → CUSTODY_TRANSFERRED →
+        DISCONNECTED → DEPARTED) with optimistic concurrency; the MOORED
+        transition names the mooring master. Requires the npa-officer role.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '200': {description: Transitioned call.}
+        '409': {description: Version conflict or invalid transition.}
+  /v1/offshore-calls/{call_id}/events:
+    post:
+      operationId: recordOffshoreEvent
+      description: >-
+        Appends an operational event (hose connection, loading-arm
+        operation, custody-transfer meter reading, mooring note) validated
+        against the workflow state. Invalid events are rejected, never
+        silently dropped.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '201': {description: Event recorded.}
+        '422': {description: Event not valid for the current call state.}
+    get:
+      operationId: listOffshoreEvents
+      description: Returns the append-only operational event trail of a call.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '200': {description: Operational events in order.}
+  /v1/offshore-calls/{call_id}/assessments:
+    post:
+      operationId: assessOffshoreCall
+      description: >-
+        Computes the terminal fee against the versioned tariff schedule
+        effective at as_of and records the revenue assessment exactly once
+        under the idempotency key (signed event to
+        finance.revenue-assessments.v1).
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '201': {description: Assessment recorded (or retained on replay).}
+        '409': {description: Idempotency key conflicts with a retained assessment.}
+        '422': {description: No effective schedule or tariff data gap.}
+  /v1/manifests:
+    post:
+      operationId: ingestPassengerManifest
+      description: >-
+        Ingests one API/BRI passenger manifest as a signed envelope v1.0
+        artifact (FHIR R4 Bundle wrap, JWS-EdDSA over RFC 8785 JCS) from the
+        manifest-authority service identity. Per-record validation; every
+        unaccepted record lands in the rejection queue with a reason.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, description: Signed envelope v1.0 artifact.}
+      responses:
+        '201': {description: Manifest accepted in full.}
+        '400': {description: Malformed artifact (quarantined with reason).}
+        '401': {description: Signature verification failed (quarantined).}
+        '403': {description: manifest-authority-agent role required.}
+        '409': {description: Envelope id conflicts with a retained manifest.}
+        '422': {description: Manifest accepted with record rejections, or rejected.}
+  /v1/manifests/{manifest_id}:
+    get:
+      operationId: getPassengerManifest
+      description: Returns the ingest outcome of one manifest.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '200': {description: The recorded manifest.}
+        '404': {description: Not found.}
+  /v1/manifest-rejections:
+    get:
+      operationId: listManifestRejections
+      description: >-
+        Reads the rejection queue (per-record reasons and envelope-level
+        quarantine entries); optional manifest_id query filter.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '200': {description: Rejection queue entries.}
+  /v1/cruise-calls:
+    post:
+      operationId: createCruiseCall
+      description: >-
+        Registers a cruise call extending an existing platform port call
+        with passenger count (band derived deterministically). Idempotent on
+        the Idempotency-Key header. Requires the npa-officer role.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '201': {description: Cruise call registered (PLANNED).}
+        '404': {description: Referenced port call not found.}
+        '409': {description: Idempotency key conflict.}
+  /v1/cruise-calls/{call_id}:
+    get:
+      operationId: getCruiseCall
+      description: Returns one cruise call.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '200': {description: The cruise call.}
+        '404': {description: Not found.}
+  /v1/cruise-calls/{call_id}/transitions:
+    post:
+      operationId: transitionCruiseCall
+      description: Advances PLANNED → CONFIRMED → ARRIVED → COMPLETED (CANCELLED before arrival) with optimistic concurrency.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '200': {description: Transitioned call.}
+        '409': {description: Version conflict or invalid transition.}
+  /v1/cruise-calls/{call_id}/pax-count:
+    post:
+      operationId: updateCruisePaxCount
+      description: >-
+        Records the final-manifest passenger count (band recomputed);
+        pre-arrival dues assessments are never mutated — recomputation is a
+        new assessment under a new idempotency key.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '200': {description: Updated call.}
+        '409': {description: Version conflict or call closed.}
+  /v1/cruise-calls/{call_id}/excursions:
+    post:
+      operationId: addCruiseExcursion
+      description: Registers an excursion manifest (idempotent).
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '201': {description: Excursion registered.}
+        '409': {description: Idempotency key conflict.}
+  /v1/cruise-calls/{call_id}/tender-allocations:
+    post:
+      operationId: allocateCruiseTender
+      description: >-
+        Reserves a tender terminal/berth window; overlapping windows on the
+        same berth are rejected (one berth serves one call at a time).
+        Requires the port-operator-admin role.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '201': {description: Allocation recorded.}
+        '403': {description: port-operator-admin role required.}
+        '422': {description: Overlapping berth window or invalid allocation.}
+  /v1/cruise-calls/{call_id}/dues-assessments:
+    post:
+      operationId: assessCruiseDues
+      description: >-
+        Computes cruise dues (per-passenger charges) against the versioned
+        CRUISE_DUES schedule effective at as_of; recorded exactly once under
+        the idempotency key (signed event to finance.revenue-assessments.v1).
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '201': {description: Assessment recorded (or retained on replay).}
+        '409': {description: Idempotency key conflicts with a retained assessment.}
+        '422': {description: No effective schedule or tariff data gap.}
 components:
   securitySchemes:
     loopbackTrustedProxy:
