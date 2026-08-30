@@ -52,9 +52,6 @@ type Store struct {
 // authorityKey/kidPrefix verify inbound manifest envelopes. All are
 // mandatory — an unverifiable pipeline fails closed at construction.
 func NewStore(pool *pgxpool.Pool, signer *events.Signer, authorityKey ed25519.PublicKey, kidPrefix string) (*Store, error) {
-	if pool == nil {
-		return nil, errors.New("manifest store requires a database pool")
-	}
 	if signer == nil {
 		return nil, errors.New("manifest store requires an envelope signer")
 	}
@@ -438,6 +435,32 @@ func (store *Store) Get(ctx context.Context, manifestID string) (Manifest, error
 		return err
 	})
 	return manifest, err
+}
+
+// ParseAuthorityKey decodes the manifest authority Ed25519 public key from
+// base64 (standard or URL, padded or raw) or hex. Anything that does not
+// decode to exactly 32 bytes fails closed.
+func ParseAuthorityKey(encoded string) (ed25519.PublicKey, error) {
+	encoded = strings.TrimSpace(encoded)
+	if encoded == "" {
+		return nil, errors.New("manifest authority public key is empty")
+	}
+	for _, decode := range []func(string) ([]byte, error){
+		base64.RawURLEncoding.DecodeString,
+		base64.URLEncoding.DecodeString,
+		base64.RawStdEncoding.DecodeString,
+		base64.StdEncoding.DecodeString,
+		hex.DecodeString,
+	} {
+		raw, err := decode(encoded)
+		if err != nil {
+			continue
+		}
+		if len(raw) == ed25519.PublicKeySize {
+			return ed25519.PublicKey(raw), nil
+		}
+	}
+	return nil, fmt.Errorf("manifest authority public key must be base64 or hex of %d bytes", ed25519.PublicKeySize)
 }
 
 func parseUUID(value string) *uuid.UUID {

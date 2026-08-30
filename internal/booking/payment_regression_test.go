@@ -67,7 +67,6 @@ func TestConfirmPaymentBindsReceiptToSwitchIssuedTxRef(t *testing.T) {
 	}
 }
 
-
 // PI-5 regression: bookings record the verified creating subject as the
 // ownership anchor for read access control.
 func TestCreateRecordsCreatorSubject(t *testing.T) {

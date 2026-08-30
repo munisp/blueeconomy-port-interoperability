@@ -10,11 +10,15 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/cruise"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/declarations"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/manifests"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/offshore"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/tariff"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
 
@@ -25,6 +29,13 @@ type Config struct {
 	Bookings     *booking.Store
 	Queues       *queue.Store
 	Declarations *declarations.Store
+	// Vessel-operations stores (W-FEAT-6): offshore terminal calls, cruise
+	// calls, API/BRI manifests and the shared tariff schedule store. All are
+	// mandatory — a partial vessel-ops surface fails closed at boot.
+	Offshore  *offshore.Store
+	Cruise    *cruise.Store
+	Manifests *manifests.Store
+	Tariffs   *tariff.Store
 	// DeclarationScorer is the fail-closed risk-scoring boundary; declaration
 	// submission cannot proceed without it.
 	DeclarationScorer declarations.Scorer
@@ -39,8 +50,8 @@ type Config struct {
 	// TenantGatewayJWKS, when set, replaces the HS256 shared-key verifier with
 	// RS256 Keycloak JWKS verification (production profile).
 	TenantGatewayJWKS *tenantctx.JWKSVerifier
-	NSWVerifier               *nswsecurity.Verifier
-	Pool                      *pgxpool.Pool
+	NSWVerifier       *nswsecurity.Verifier
+	Pool              *pgxpool.Pool
 	// FGNShareBasisPoints is the FGN levy split out of each booking amount.
 	FGNShareBasisPoints int64
 	// NSWReplayTTL bounds how long ingress replay hashes are retained.
@@ -52,6 +63,10 @@ type Server struct {
 	bookings                  *booking.Store
 	queues                    *queue.Store
 	declarations              *declarations.Store
+	offshore                  *offshore.Store
+	cruise                    *cruise.Store
+	manifests                 *manifests.Store
+	tariffs                   *tariff.Store
 	declarationScorer         declarations.Scorer
 	declarationHighValueMinor int64
 	payments                  payments.Gateway
@@ -63,6 +78,9 @@ type Server struct {
 func New(config Config) (http.Handler, error) {
 	if config.Store == nil || config.Bookings == nil || config.Queues == nil || config.Declarations == nil || config.Pool == nil {
 		return nil, errors.New("server requires port-call, booking, queue and declaration stores")
+	}
+	if config.Offshore == nil || config.Cruise == nil || config.Manifests == nil || config.Tariffs == nil {
+		return nil, errors.New("server requires offshore, cruise, manifest and tariff stores")
 	}
 	if config.Payments == nil || config.Orchestrator == nil || config.CallUps == nil {
 		return nil, errors.New("server requires a payments gateway and workflow orchestrators")
@@ -84,6 +102,10 @@ func New(config Config) (http.Handler, error) {
 		bookings:                  config.Bookings,
 		queues:                    config.Queues,
 		declarations:              config.Declarations,
+		offshore:                  config.Offshore,
+		cruise:                    config.Cruise,
+		manifests:                 config.Manifests,
+		tariffs:                   config.Tariffs,
 		declarationScorer:         config.DeclarationScorer,
 		declarationHighValueMinor: config.DeclarationHighValueMinor,
 		payments:                  config.Payments,
@@ -112,6 +134,16 @@ func New(config Config) (http.Handler, error) {
 	api.HandleFunc("GET /v1/declarations", server.listDeclarations)
 	api.HandleFunc("GET /v1/declarations/", server.declarationRead)
 	api.HandleFunc("POST /v1/declarations/", server.declarationOperation)
+	api.HandleFunc("POST /v1/tariff-schedules", server.registerTariffSchedule)
+	api.HandleFunc("POST /v1/offshore-calls", server.createOffshoreCall)
+	api.HandleFunc("GET /v1/offshore-calls/", server.offshoreCallRead)
+	api.HandleFunc("POST /v1/offshore-calls/", server.offshoreCallOperation)
+	api.HandleFunc("POST /v1/manifests", server.ingestManifest)
+	api.HandleFunc("GET /v1/manifests/", server.manifestRead)
+	api.HandleFunc("GET /v1/manifest-rejections", server.manifestRejections)
+	api.HandleFunc("POST /v1/cruise-calls", server.createCruiseCall)
+	api.HandleFunc("GET /v1/cruise-calls/", server.cruiseCallRead)
+	api.HandleFunc("POST /v1/cruise-calls/", server.cruiseCallOperation)
 
 	nswIngress, err := nswsecurity.NewIngress(nswsecurity.IngressConfig{
 		SignatureHeader: "X-NSW-Signature",

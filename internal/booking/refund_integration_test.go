@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	tb "github.com/tigerbeetle/tigerbeetle-go"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/ledger"
+	tb "github.com/tigerbeetle/tigerbeetle-go"
 )
 
 // GAP-PIO-01(b): the refund rail settles a paid booking back through the

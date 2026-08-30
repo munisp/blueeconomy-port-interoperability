@@ -15,14 +15,18 @@ import (
 	"time"
 
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/cruise"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/declarations"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/ledger"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/manifests"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/offshore"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/server"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/tariff"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/telemetry"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
@@ -218,11 +222,28 @@ func run() error {
 	if err := bookingStore.SetRefundPoster(settlement, fgnShareBPS); err != nil {
 		return fmt.Errorf("wire refund rail: %w", err)
 	}
+	// Vessel-operations surface (W-FEAT-6): offshore terminal calls, cruise
+	// calls, API/BRI manifest ingest and the shared tariff store. The
+	// manifest authority key/prefix pin the API/BRI signing authority;
+	// ingest fails closed without them.
+	manifestAuthorityKey, err := manifests.ParseAuthorityKey(requiredEnv("MANIFEST_AUTHORITY_PUBLIC_KEY"))
+	if err != nil {
+		return fmt.Errorf("configure manifest authority: %w", err)
+	}
+	manifestKIDPrefix := requiredEnv("MANIFEST_AUTHORITY_KID_PREFIX")
+	manifestStore, err := manifests.NewStore(pool, envelopeSigner, manifestAuthorityKey, manifestKIDPrefix)
+	if err != nil {
+		return fmt.Errorf("configure manifest store: %w", err)
+	}
 	handler, err := server.New(server.Config{
 		Store:                     portcall.NewStore(pool),
 		Bookings:                  bookingStore,
 		Queues:                    queueStore,
 		Declarations:              declarations.NewStore(pool, envelopeSigner),
+		Offshore:                  offshore.NewStore(pool, envelopeSigner),
+		Cruise:                    cruise.NewStore(pool, envelopeSigner),
+		Manifests:                 manifestStore,
+		Tariffs:                   tariff.NewStore(pool, envelopeSigner),
 		DeclarationScorer:         declarationScorer,
 		DeclarationHighValueMinor: highValueMinor,
 		Payments:                  paymentsGateway,

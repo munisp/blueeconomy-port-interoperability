@@ -12,14 +12,32 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
-	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/cruise"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/declarations"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/manifests"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/offshore"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/tariff"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
+
+// mustManifestStore builds a manifest store without a database for
+// fail-closed constructor tests.
+func mustManifestStore() *manifests.Store {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	store, err := manifests.NewStore(nil, mustSigner(), public, "manifest-authority-")
+	if err != nil {
+		panic(err)
+	}
+	return store
+}
 
 // mustSigner builds a throwaway envelope signer for constructor tests.
 func mustSigner() *events.Signer {
@@ -86,6 +104,10 @@ func testConfig() Config {
 		Bookings:          booking.NewStore(nil, mustSigner()),
 		Queues:            mustQueueStore(),
 		Declarations:      declarations.NewStore(nil, mustSigner()),
+		Offshore:          offshore.NewStore(nil, mustSigner()),
+		Cruise:            cruise.NewStore(nil, mustSigner()),
+		Manifests:         mustManifestStore(),
+		Tariffs:           tariff.NewStore(nil, mustSigner()),
 		DeclarationScorer: fakeScorer{},
 		Payments:          fakePayments{},
 		Orchestrator:      fakeOrchestrator{},

@@ -84,7 +84,7 @@ func (env amendEnv) clearedCall(t *testing.T, callID string) (string, int64) {
 	if err := env.store.RegisterAgencyProfile(env.ctx, AgencyProfileRegistration{
 		ProfileID: "profile-npa-1", Version: "v1", AgencyCode: "NPA",
 		ProfileSHA256: "sha256:9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c",
-		RegisteredBy: "portcall-test-officer", Active: true,
+		RegisteredBy:  "portcall-test-officer", Active: true,
 	}); err != nil {
 		t.Fatalf("register agency profile: %v", err)
 	}

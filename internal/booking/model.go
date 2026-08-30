@@ -130,16 +130,16 @@ type CreateRequest struct {
 }
 
 type Booking struct {
-	BookingID            string    `json:"booking_id"`
-	TenantID             string    `json:"tenant_id"`
-	RequestID            string    `json:"request_id"`
-	TruckPlate           string    `json:"truck_plate"`
-	TruckerMSISDN        string    `json:"trucker_msisdn"`
-	TerminalID           string    `json:"terminal_id"`
+	BookingID     string `json:"booking_id"`
+	TenantID      string `json:"tenant_id"`
+	RequestID     string `json:"request_id"`
+	TruckPlate    string `json:"truck_plate"`
+	TruckerMSISDN string `json:"trucker_msisdn"`
+	TerminalID    string `json:"terminal_id"`
 	// CreatedBy is the verified subject that registered the booking; it is
 	// the ownership anchor for read access control. Nil for pre-migration
 	// rows (readable by officer roles only).
-	CreatedBy *string `json:"created_by,omitempty"`
+	CreatedBy            *string   `json:"created_by,omitempty"`
 	SlotID               *string   `json:"slot_id,omitempty"`
 	Channel              Channel   `json:"channel"`
 	Status               Status    `json:"status"`
