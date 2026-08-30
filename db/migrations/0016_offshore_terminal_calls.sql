@@ -66,6 +66,10 @@ CREATE TABLE offshore_terminal_calls (
     buoy_id TEXT NOT NULL CHECK (length(buoy_id) BETWEEN 1 AND 64),
     agency_code TEXT NOT NULL CHECK (agency_code ~ '^[A-Z]{2,8}$'),
     gross_tonnage BIGINT NOT NULL CHECK (gross_tonnage > 0),
+    -- Declared cargo quantity (manifest tonnes) the PER_TON tariff rules
+    -- price against; recomputation on the final custody-transfer quantity is
+    -- a new assessment with a new idempotency key.
+    cargo_tonnes BIGINT NOT NULL DEFAULT 0 CHECK (cargo_tonnes >= 0),
     mooring_window_start TIMESTAMPTZ NOT NULL,
     mooring_window_end TIMESTAMPTZ NOT NULL,
     status TEXT NOT NULL CHECK (status IN (

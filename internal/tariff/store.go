@@ -244,6 +244,9 @@ func RecordAssessmentTx(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims,
 	if params.TotalMinor < 0 || len(params.LineItems) == 0 {
 		return Assessment{}, errors.New("assessment requires a non-negative total and at least one line item")
 	}
+	// timestamptz stores microseconds; canonicalize so an exact replay of the
+	// as-of instant compares equal after the database round-trip.
+	params.AsOf = params.AsOf.UTC().Truncate(time.Microsecond)
 	factsJSON, err := json.Marshal(params.Facts)
 	if err != nil {
 		return Assessment{}, fmt.Errorf("encode assessment facts: %w", err)
