@@ -1,922 +1,131 @@
-openapi: 3.1.0
+# blueeconomy-port-interoperability HTTP API.
+#
+# Coverage note: this document currently describes the mobile push-token
+# surface only (added with the /v1/push-tokens implementation). The wider
+# route surface (port calls, bookings, queue, declarations, secure chain,
+# vessel ops) predates this document and is documented route-by-route as it
+# is touched.
+openapi: 3.0.3
 info:
-  title: Blue Economy Port Interoperability API
+  title: blueeconomy-port-interoperability
   version: 0.1.0
   description: >-
-    Implemented local port-call workflow plus the customs declaration engine
-    (/v1/declarations); IMO/NSW partner profiles remain separate acceptance
-    gates. The eCallUp booking, slot, gate-scan, call-up queue and NSW ingress
-    routes (/v1/bookings, /v1/slots, /v1/terminals, /v1/queue-requests,
-    /v1/terminals/{id}/queue, /v1/gate/scans, /v1/nsw/port-calls) are wired and
-    tenant-isolated but are documented in README.md until the Ministry
-    approves their external interface profile. All /v1 routes require the
-    loopback trusted-proxy headers plus a validated HS256 gateway tenant token
-    (Authorization: Bearer); the NSW ingress route instead requires an RS256
-    authority JWS in X-NSW-Signature.
+    NSW/port-community interoperability API. All /v1 routes require the
+    tenant gateway Bearer token (HS256 shared-key or RS256 Keycloak JWKS
+    profile); the verified token subject is the actor identity for every
+    write.
 servers:
-  - url: http://localhost:18080
+  - url: /
+
 paths:
-  /healthz:
-    get:
-      operationId: health
-      responses:
-        '200':
-          description: Service is alive.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [status]
-                properties:
-                  status:
-                    const: ok
-  /v1/port-calls:
+  /v1/push-tokens:
     post:
-      operationId: createPortCall
-      security: [loopbackTrustedProxy: []]
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-        - $ref: '#/components/parameters/TrustedProxy'
-        - $ref: '#/components/parameters/AuthenticatedPrincipal'
+      summary: Register or refresh a mobile push-notification device token
+      description: >-
+        Upserts the caller's (tenant, verified user subject, device) push
+        token registration. A provider token moving between devices or users
+        revokes the previous ACTIVE holder in the same transaction.
+      security:
+        - tenantGatewayToken: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreatePortCallRequest'
+              $ref: '#/components/schemas/PushTokenRegisterRequest'
       responses:
         '201':
-          description: Created or exact idempotent replay.
+          description: Token registered (created or refreshed)
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PortCall'
-        '400': {description: Invalid request or missing idempotency key.}
-        '401': {description: Missing verified local edge identity.}
-        '409': {description: Conflicting idempotency reuse.}
-  /v1/port-calls/{call_id}:
-    get:
-      operationId: getPortCall
-      security: [loopbackTrustedProxy: []]
-      parameters:
-        - $ref: '#/components/parameters/CallID'
-        - $ref: '#/components/parameters/TrustedProxy'
-        - $ref: '#/components/parameters/AuthenticatedPrincipal'
-      responses:
-        '200':
-          description: Port call.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/PortCall'}
-        '401': {description: Missing verified local edge identity.}
-        '404': {description: Port call not found.}
-  /v1/port-calls/{call_id}/submit:
+                $ref: '#/components/schemas/PushToken'
+        '400':
+          description: Malformed JSON or validation failure
+        '401':
+          description: Missing/invalid tenant gateway token
+
+  /v1/push-tokens/revoke:
     post:
-      operationId: submitPortCall
-      security: [loopbackTrustedProxy: []]
-      parameters:
-        - $ref: '#/components/parameters/CallID'
-        - $ref: '#/components/parameters/TrustedProxy'
-        - $ref: '#/components/parameters/AuthenticatedPrincipal'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/TransitionRequest'}
-      responses:
-        '200': {description: Port call submitted.}
-        '409': {description: Version or state conflict.}
-  /v1/port-calls/{call_id}/accept:
-    post:
-      operationId: acceptPortCall
-      security: [loopbackTrustedProxy: []]
-      parameters:
-        - $ref: '#/components/parameters/CallID'
-        - $ref: '#/components/parameters/TrustedProxy'
-        - $ref: '#/components/parameters/AuthenticatedPrincipal'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/TransitionRequest'}
-      responses:
-        '200': {description: Port call accepted.}
-        '409': {description: Version or state conflict.}
-  /v1/port-calls/{call_id}/reject:
-    post:
-      operationId: rejectPortCall
-      security: [loopbackTrustedProxy: []]
-      parameters:
-        - $ref: '#/components/parameters/CallID'
-        - $ref: '#/components/parameters/TrustedProxy'
-        - $ref: '#/components/parameters/AuthenticatedPrincipal'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/TransitionRequest'}
-      responses:
-        '200': {description: Port call rejected.}
-        '409': {description: Version or state conflict.}
-  /v1/partner-capabilities:
-    get:
-      operationId: getPartnerCapabilities
-      security: [loopbackTrustedProxy: []]
-      parameters:
-        - $ref: '#/components/parameters/TrustedProxy'
-        - $ref: '#/components/parameters/AuthenticatedPrincipal'
-      responses:
-        '200': {description: Source-backed local capabilities.}
-        '401': {description: Missing verified edge identity.}
-  /v1/port-calls/{call_id}/documents:
-    post:
-      operationId: declareDocument
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/CallID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/DocumentDeclarationRequest'}}}}
-      responses: {'201': {description: Declared document.}, '409': {description: Replay/conflict.}, '422': {description: Invalid workflow.}}
-  /v1/port-calls/{call_id}/documents/review:
-    post:
-      operationId: reviewDocument
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/CallID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/DocumentReviewRequest'}}}}
-      responses: {'200': {description: Reviewed document.}, '409': {description: Version/state conflict.}}
-  /v1/port-calls/{call_id}/documents/supersede:
-    post:
-      operationId: supersedeDocument
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/CallID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/DocumentSupersessionRequest'}}}}
-      responses: {'201': {description: Immutable supersession evidence recorded.}, '409': {description: Document conflict.}}
-  /v1/port-calls/{call_id}/clearance:
-    post:
-      operationId: decideClearance
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/CallID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ClearanceDecisionRequest'}}}}
-      responses: {'201': {description: Clearance decision.}, '409': {description: Version/decision conflict.}, '422': {description: Evidence prerequisite unmet.}}
-  /v1/port-calls/{call_id}/clearance/amend:
-    post:
-      operationId: amendClearance
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/CallID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ClearanceAmendmentRequest'}}}}
-      responses: {'200': {description: Amended clearance.}, '409': {description: Version/actor/decision conflict.}, '422': {description: Invalid amendment.}}
-  /v1/declarations:
-    post:
-      operationId: createDeclaration
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/DeclarationCreateRequest'}
-      responses:
-        '201':
-          description: Draft declaration created (or exact idempotent replay of request_id).
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/Declaration'}
-        '400': {description: Invalid declaration JSON or unknown field.}
-        '401': {description: Missing verified local edge identity.}
-        '409': {description: Conflicting reuse of request_id with divergent content.}
-        '422': {description: Declaration content failed validation.}
-    get:
-      operationId: listDeclarations
-      security: [loopbackTrustedProxy: []]
+      summary: Revoke a device push-token registration
       description: >-
-        Role-scoped list: the caller sees only its own declarations
-        (trader_id = verified subject); the optional trader_id filter may
-        only name the caller. Out-of-range limit/offset fall back to
-        limit=50, offset=0.
-      parameters:
-        - {$ref: '#/components/parameters/TrustedProxy'}
-        - {$ref: '#/components/parameters/AuthenticatedPrincipal'}
-        - name: trader_id
-          in: query
-          required: false
-          schema: {type: string}
-        - name: status
-          in: query
-          required: false
-          schema: {$ref: '#/components/schemas/DeclarationStatus'}
-        - name: limit
-          in: query
-          required: false
-          schema: {type: integer, minimum: 1, maximum: 200, default: 50}
-        - name: offset
-          in: query
-          required: false
-          schema: {type: integer, minimum: 0, default: 0}
+        Marks the caller's device registration REVOKED (logout / token
+        rollover). Unknown or already-revoked devices fail closed with 404.
+      security:
+        - tenantGatewayToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId]
+              additionalProperties: false
+              properties:
+                deviceId:
+                  type: string
+                  minLength: 1
+                  maxLength: 256
       responses:
         '200':
-          description: Declarations owned by the caller, newest first.
+          description: Token revoked
           content:
             application/json:
               schema:
-                type: object
-                required: [declarations]
-                properties:
-                  declarations:
-                    type: array
-                    items: {$ref: '#/components/schemas/Declaration'}
-        '401': {description: Missing verified tenant claims.}
-        '403': {description: trader_id filter names another principal.}
-  /v1/declarations/{declaration_id}:
-    get:
-      operationId: getDeclaration
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/DeclarationID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '200':
-          description: Declaration.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/Declaration'}
-        '401': {description: Missing verified local edge identity.}
-        '404': {description: Declaration not found.}
-  /v1/declarations/{declaration_id}/clearance-certificate:
-    get:
-      operationId: getClearanceCertificate
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/DeclarationID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '200':
-          description: Clearance certificate and its declaration.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [certificate, declaration]
-                properties:
-                  certificate: {$ref: '#/components/schemas/ClearanceCertificate'}
-                  declaration: {$ref: '#/components/schemas/Declaration'}
-        '401': {description: Missing verified local edge identity.}
-        '404': {description: Declaration not found.}
-        '409': {description: Declaration is not in a cleared state.}
-  /v1/declarations/{declaration_id}/submit:
-    post:
-      operationId: submitDeclaration
-      description: >-
-        DRAFT -> SUBMITTED followed by the fail-closed risk assessment. A
-        scorer outage parks the declaration in SCORING_UNAVAILABLE; the
-        response always reflects the persisted state.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/DeclarationID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/TransitionRequest'}
-      responses:
-        '200':
-          description: Declaration after submission and risk assessment.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/Declaration'}
-        '400': {description: expected_version must be a positive integer.}
-        '401': {description: Missing verified local edge identity.}
-        '404': {description: Declaration not found.}
-        '409': {description: Version or state conflict.}
-  /v1/declarations/{declaration_id}/amendments:
-    post:
-      operationId: amendDeclaration
-      description: >-
-        Supersedes the live (amendable) revision with a new DRAFT revision
-        carrying the amended content.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/DeclarationID'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: '#/components/schemas/DeclarationAmendmentRequest'}
-      responses:
-        '201':
-          description: New DRAFT revision superseding the amended declaration.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/Declaration'}
-        '400': {description: expected_version and the amendment content are required.}
-        '401': {description: Missing verified local edge identity.}
-        '404': {description: Declaration not found.}
-        '409': {description: Version conflict or the declaration is not amendable.}
-        '422': {description: Amended content failed validation.}
-  /v1/secure-chain/bl-registry:
-    post:
-      operationId: registerSecureChainBLAuthority
-      description: >-
-        Secure Chain (WP-7): records the calling shipping line's release
-        authority over a bill-of-lading digest (SHA-256 of the carrier
-        manifest record) and container. The shipping line is the verified
-        token subject; no PIN or shared secret exists anywhere in the flow.
-        Requires the shipping-line role.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [container_id, bl_digest]
-              properties:
-                container_id: {type: string, pattern: '^[A-Z]{4}[0-9]{7}$', description: ISO 6346 container number.}
-                bl_digest: {type: string, pattern: '^[0-9a-f]{64}$', description: SHA-256 of the carrier B/L manifest record.}
-      responses:
-        '201': {description: Release authority registered.}
-        '400': {description: Invalid request.}
-        '403': {description: shipping-line role required.}
-  /v1/secure-chains:
-    post:
-      operationId: createSecureChain
-      description: >-
-        Opens a verified release chain for an import container. The caller
-        must hold B/L release authority (bl-registry) and becomes the first
-        chain tail. Idempotent on the Idempotency-Key header; one ACTIVE
-        chain per container is DB-enforced. Requires the shipping-line role.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [container_id, bl_digest, expires_at]
-              properties:
-                container_id: {type: string, pattern: '^[A-Z]{4}[0-9]{7}$'}
-                bl_digest: {type: string, pattern: '^[0-9a-f]{64}$'}
-                expires_at: {type: string, format: date-time}
-      responses:
-        '201': {description: Release chain created (ACTIVE).}
-        '400': {description: Invalid request or missing Idempotency-Key.}
-        '403': {description: No B/L release authority or shipping-line role required.}
-        '409': {description: Idempotency key conflicts with a retained chain.}
-        '422': {description: An ACTIVE chain already exists for the container.}
-  /v1/secure-chains/{container_id}:
-    get:
-      operationId: getSecureChain
-      description: Returns the most recent release chain for a container with its hash-chained links.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '200': {description: The release chain with links.}
-        '404': {description: Not found.}
-  /v1/secure-chains/{chain_id}/nominations:
-    post:
-      operationId: nominateSecureChainLink
-      description: >-
-        The current verified chain tail nominates the next organisation
-        (line → forwarder → transporter). The nominator is the verified token
-        subject; the link is appended to the hash-chained, append-only link
-        ledger. A pending nomination blocks further nominations until
-        resolved. Velocity-anomaly policy may flag or hold the chain.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [to_org]
-              properties:
-                to_org: {type: string, description: Organisation identifier of the next chain holder.}
-      responses:
-        '201': {description: Link nominated (PENDING).}
-        '403': {description: Caller does not hold the verified chain tail.}
-        '422': {description: Chain not ACTIVE, on velocity hold, or a nomination is pending.}
-  /v1/secure-chains/{chain_id}/links/{seq}/accept:
-    post:
-      operationId: acceptSecureChainLink
-      description: The nominated organisation explicitly accepts the pending link; the tail moves to it.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '200': {description: Link accepted (ACCEPTED).}
-        '403': {description: Caller is not the nominated organisation.}
-        '422': {description: No pending nomination at this seq.}
-  /v1/secure-chains/{chain_id}/links/{seq}/decline:
-    post:
-      operationId: declineSecureChainLink
-      description: The nominated organisation declines; the chain tail returns to the nominator.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [reason]
-              properties:
-                reason: {type: string}
-      responses:
-        '200': {description: Link declined (DECLINED).}
-        '403': {description: Caller is not the nominated organisation.}
-        '422': {description: No pending nomination at this seq.}
-  /v1/secure-chains/{chain_id}/revoke:
-    post:
-      operationId: revokeSecureChain
-      description: >-
-        The issuing shipping line revokes the chain; revocation cascades to
-        every link and kills outstanding release tokens (they validate
-        against chain status at the gate).
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [reason]
-              properties:
-                reason: {type: string}
-      responses:
-        '200': {description: Chain revoked (REVOKED).}
-        '403': {description: Only the issuing shipping line may revoke.}
-        '422': {description: Chain is not ACTIVE.}
-  /v1/secure-chains/audit/{chain_id}:
-    get:
-      operationId: getSecureChainAuditTrail
-      description: Returns the hash-chained append-only audit ledger of a release chain.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '200': {description: Audit entries in chain order.}
-        '404': {description: Not found.}
-  /v1/secure-chain/{container_id}/release-authorization:
-    get:
-      operationId: getSecureChainReleaseAuthorization
-      description: >-
-        Terminal-release check: returns 200 with a short-TTL, single-use,
-        envelope-signed (JWS EdDSA/JCS) authorization token ONLY to the
-        verified chain tail holder. eCallUp check-in / the gate must present
-        the token nonce. Wrong organisation, pending nomination, expired,
-        revoked or held chains are refused.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '200': {description: Signed single-use release authorization token.}
-        '403': {description: Caller does not hold the verified chain tail.}
-        '404': {description: No ACTIVE chain for the container.}
-        '422': {description: Chain on velocity hold or nomination pending.}
-  /v1/secure-chain/consume:
-    post:
-      operationId: consumeSecureChainRelease
-      description: >-
-        Gate/eCallUp check-in redeems a release token. The nonce is consumed
-        atomically (single-use; replay is DB-rejected), the embedded JWS is
-        verified against the service signing key and the chain completes.
-        Requires the terminal-operator or gate-officer role.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [nonce, gate_id]
-              properties:
-                nonce: {type: string, pattern: '^[0-9a-f]{64}$'}
-                gate_id: {type: string}
-      responses:
-        '200': {description: Token consumed; chain COMPLETED.}
-        '403': {description: terminal-operator or gate-officer role required.}
-        '422': {description: Token invalid, expired or already consumed.}
-  /v1/tariff-schedules:
-    post:
-      operationId: registerTariffSchedule
-      description: >-
-        Registers a versioned, effective-dated tariff schedule (rates as
-        DATA, each with a legal anchor) for OFFSHORE_TERMINAL or CRUISE_DUES
-        assessments. Schedules are immutable; rate changes are a new
-        schedule_id. Requires the port-operator-admin role.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {type: object, description: Tariff schedule with rules; registered_by is pinned server-side to the verified caller.}
-      responses:
-        '201': {description: Schedule registered.}
-        '400': {description: Invalid schedule shape.}
-        '401': {description: Missing verified local edge identity.}
-        '403': {description: port-operator-admin role required.}
-        '422': {description: Schedule conflicts with an immutable retained schedule.}
-  /v1/offshore-calls:
-    post:
-      operationId: createOffshoreCall
-      description: >-
-        Registers a tanker call at an offshore (SBM/SPM/FPSO) terminal with
-        its mooring window. Idempotent on the Idempotency-Key header.
-        Requires the npa-officer role.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {type: object, description: Vessel IMO/name, terminal code/kind, buoy, agency, tonnages, mooring window.}
-      responses:
-        '201': {description: Offshore call registered (NOMINATED).}
-        '400': {description: Invalid request or missing Idempotency-Key.}
-        '403': {description: npa-officer role required.}
-        '409': {description: Idempotency key conflicts with a retained call.}
-  /v1/offshore-calls/{call_id}:
-    get:
-      operationId: getOffshoreCall
-      description: Returns one offshore terminal call.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '200': {description: The offshore call.}
-        '404': {description: Not found.}
-  /v1/offshore-calls/{call_id}/transitions:
-    post:
-      operationId: transitionOffshoreCall
-      description: >-
-        Advances the mooring-master workflow (NOMINATED → APPROACH_CLEARED →
-        MOORED → HOSE_CONNECTED → LOADING → CUSTODY_TRANSFERRED →
-        DISCONNECTED → DEPARTED) with optimistic concurrency; the MOORED
-        transition names the mooring master. Requires the npa-officer role.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '200': {description: Transitioned call.}
-        '409': {description: Version conflict or invalid transition.}
-  /v1/offshore-calls/{call_id}/events:
-    post:
-      operationId: recordOffshoreEvent
-      description: >-
-        Appends an operational event (hose connection, loading-arm
-        operation, custody-transfer meter reading, mooring note) validated
-        against the workflow state. Invalid events are rejected, never
-        silently dropped.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '201': {description: Event recorded.}
-        '422': {description: Event not valid for the current call state.}
-    get:
-      operationId: listOffshoreEvents
-      description: Returns the append-only operational event trail of a call.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '200': {description: Operational events in order.}
-  /v1/offshore-calls/{call_id}/assessments:
-    post:
-      operationId: assessOffshoreCall
-      description: >-
-        Computes the terminal fee against the versioned tariff schedule
-        effective at as_of and records the revenue assessment exactly once
-        under the idempotency key (signed event to
-        finance.revenue-assessments.v1).
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '201': {description: Assessment recorded (or retained on replay).}
-        '409': {description: Idempotency key conflicts with a retained assessment.}
-        '422': {description: No effective schedule or tariff data gap.}
-  /v1/manifests:
-    post:
-      operationId: ingestPassengerManifest
-      description: >-
-        Ingests one API/BRI passenger manifest as a signed envelope v1.0
-        artifact (FHIR R4 Bundle wrap, JWS-EdDSA over RFC 8785 JCS) from the
-        manifest-authority service identity. Per-record validation; every
-        unaccepted record lands in the rejection queue with a reason.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {type: object, description: Signed envelope v1.0 artifact.}
-      responses:
-        '201': {description: Manifest accepted in full.}
-        '400': {description: Malformed artifact (quarantined with reason).}
-        '401': {description: Signature verification failed (quarantined).}
-        '403': {description: manifest-authority-agent role required.}
-        '409': {description: Envelope id conflicts with a retained manifest.}
-        '422': {description: Manifest accepted with record rejections, or rejected.}
-  /v1/manifests/{manifest_id}:
-    get:
-      operationId: getPassengerManifest
-      description: Returns the ingest outcome of one manifest.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '200': {description: The recorded manifest.}
-        '404': {description: Not found.}
-  /v1/manifest-rejections:
-    get:
-      operationId: listManifestRejections
-      description: >-
-        Reads the rejection queue (per-record reasons and envelope-level
-        quarantine entries); optional manifest_id query filter.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '200': {description: Rejection queue entries.}
-  /v1/cruise-calls:
-    post:
-      operationId: createCruiseCall
-      description: >-
-        Registers a cruise call extending an existing platform port call
-        with passenger count (band derived deterministically). Idempotent on
-        the Idempotency-Key header. Requires the npa-officer role.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '201': {description: Cruise call registered (PLANNED).}
-        '404': {description: Referenced port call not found.}
-        '409': {description: Idempotency key conflict.}
-  /v1/cruise-calls/{call_id}:
-    get:
-      operationId: getCruiseCall
-      description: Returns one cruise call.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '200': {description: The cruise call.}
-        '404': {description: Not found.}
-  /v1/cruise-calls/{call_id}/transitions:
-    post:
-      operationId: transitionCruiseCall
-      description: Advances PLANNED → CONFIRMED → ARRIVED → COMPLETED (CANCELLED before arrival) with optimistic concurrency.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '200': {description: Transitioned call.}
-        '409': {description: Version conflict or invalid transition.}
-  /v1/cruise-calls/{call_id}/pax-count:
-    post:
-      operationId: updateCruisePaxCount
-      description: >-
-        Records the final-manifest passenger count (band recomputed);
-        pre-arrival dues assessments are never mutated — recomputation is a
-        new assessment under a new idempotency key.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '200': {description: Updated call.}
-        '409': {description: Version conflict or call closed.}
-  /v1/cruise-calls/{call_id}/excursions:
-    post:
-      operationId: addCruiseExcursion
-      description: Registers an excursion manifest (idempotent).
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '201': {description: Excursion registered.}
-        '409': {description: Idempotency key conflict.}
-  /v1/cruise-calls/{call_id}/tender-allocations:
-    post:
-      operationId: allocateCruiseTender
-      description: >-
-        Reserves a tender terminal/berth window; overlapping windows on the
-        same berth are rejected (one berth serves one call at a time).
-        Requires the port-operator-admin role.
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '201': {description: Allocation recorded.}
-        '403': {description: port-operator-admin role required.}
-        '422': {description: Overlapping berth window or invalid allocation.}
-  /v1/cruise-calls/{call_id}/dues-assessments:
-    post:
-      operationId: assessCruiseDues
-      description: >-
-        Computes cruise dues (per-passenger charges) against the versioned
-        CRUISE_DUES schedule effective at as_of; recorded exactly once under
-        the idempotency key (signed event to finance.revenue-assessments.v1).
-      security: [loopbackTrustedProxy: []]
-      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
-      responses:
-        '201': {description: Assessment recorded (or retained on replay).}
-        '409': {description: Idempotency key conflicts with a retained assessment.}
-        '422': {description: No effective schedule or tariff data gap.}
+                $ref: '#/components/schemas/PushToken'
+        '400':
+          description: Malformed JSON or missing deviceId
+        '401':
+          description: Missing/invalid tenant gateway token
+        '404':
+          description: Unknown or already-revoked device
+
 components:
   securitySchemes:
-    loopbackTrustedProxy:
-      type: apiKey
-      in: header
-      name: X-Authenticated-Principal
-      description: Local-only boundary; production requires a verified Ministry OIDC/API-edge profile.
-  parameters:
-    IdempotencyKey:
-      name: Idempotency-Key
-      in: header
-      required: true
-      schema: {type: string, minLength: 1, maxLength: 256}
-    TrustedProxy:
-      name: X-Trusted-Proxy
-      in: header
-      required: true
-      schema: {type: string, const: loopback}
-    AuthenticatedPrincipal:
-      name: X-Authenticated-Principal
-      in: header
-      required: true
-      schema: {type: string, minLength: 1}
-    CallID:
-      name: call_id
-      in: path
-      required: true
-      schema: {type: string, minLength: 1, maxLength: 256}
-    DeclarationID:
-      name: declaration_id
-      in: path
-      required: true
-      schema: {type: string, minLength: 1}
+    tenantGatewayToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
   schemas:
-    CreatePortCallRequest:
+    PushTokenRegisterRequest:
       type: object
+      required: [deviceId, token, platform]
       additionalProperties: false
-      required: [call_id, vessel_imo, port_code, declaration_reference, submitted_by]
       properties:
-        call_id: {type: string, minLength: 1, maxLength: 256}
-        vessel_imo: {type: string, pattern: '^[0-9]{7}$'}
-        port_code: {type: string, pattern: '^[A-Z]{2,8}$'}
-        declaration_reference: {type: string, minLength: 1, maxLength: 256}
-        submitted_by: {type: string, minLength: 1, maxLength: 256}
-    TransitionRequest:
+        deviceId:
+          type: string
+          minLength: 1
+          maxLength: 256
+        token:
+          type: string
+          minLength: 8
+          maxLength: 4096
+          description: Provider-issued push token (FCM/APNs registration token)
+        platform:
+          type: string
+          enum: [android, ios, web]
+    PushToken:
       type: object
-      additionalProperties: false
-      required: [expected_version]
       properties:
-        expected_version: {type: integer, minimum: 1}
-    DocumentDeclarationRequest:
-      type: object
-      additionalProperties: false
-      required: [document_type, media_type, size_bytes, sha256, declared_by]
-      properties:
-        document_type: {type: string, pattern: '^[A-Za-z][A-Za-z0-9._:-]{0,63}$'}
-        media_type: {type: string, pattern: '^[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+$'}
-        size_bytes: {type: integer, minimum: 1, maximum: 104857600}
-        sha256: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
-        declared_by: {type: string, minLength: 1, maxLength: 256}
-    DocumentReviewRequest:
-      type: object
-      additionalProperties: false
-      required: [document_id, expected_version, status, reviewed_by, reason]
-      properties:
-        document_id: {type: string, format: uuid}
-        expected_version: {type: integer, minimum: 1}
-        status: {type: string, enum: [VERIFIED, REJECTED]}
-        reviewed_by: {type: string, minLength: 1, maxLength: 256}
-        reason: {type: string, minLength: 1, maxLength: 1024}
-    DocumentSupersessionRequest:
-      type: object
-      additionalProperties: false
-      required: [original_document_id, replacement_document_id, reason, superseded_by]
-      properties:
-        original_document_id: {type: string, format: uuid}
-        replacement_document_id: {type: string, format: uuid}
-        reason: {type: string, minLength: 1, maxLength: 1024}
-        superseded_by: {type: string, minLength: 1, maxLength: 256}
-    ClearanceDecisionRequest:
-      type: object
-      additionalProperties: false
-      required: [expected_version, decision, reason, decided_by]
-      properties:
-        expected_version: {type: integer, minimum: 1}
-        decision: {type: string, enum: [APPROVED, REJECTED]}
-        reason: {type: string, minLength: 1, maxLength: 1024}
-        decided_by: {type: string, minLength: 1, maxLength: 256}
-    ClearanceAmendmentRequest:
-      type: object
-      additionalProperties: false
-      required: [expected_version, decision, reason, amended_by]
-      properties:
-        expected_version: {type: integer, minimum: 1}
-        decision: {type: string, enum: [APPROVED, REJECTED]}
-        reason: {type: string, minLength: 1, maxLength: 1024}
-        amended_by: {type: string, minLength: 1, maxLength: 256}
-    PortCall:
-      type: object
-      required: [call_id, vessel_imo, port_code, declaration_reference, submitted_by, status, created_at, updated_at, version]
-      properties:
-        call_id: {type: string}
-        vessel_imo: {type: string}
-        port_code: {type: string}
-        declaration_reference: {type: string}
-        submitted_by: {type: string}
-        status: {type: string, enum: [DRAFT, SUBMITTED, ACCEPTED, REJECTED]}
-        created_at: {type: string, format: date-time}
-        updated_at: {type: string, format: date-time}
-        version: {type: integer, minimum: 1}
-    DeclarationStatus:
-      type: string
-      enum: [DRAFT, SUBMITTED, RISK_ASSESSED, GREEN_LANE, YELLOW_LANE, RED_LANE, CLEARED, REJECTED, SCORING_UNAVAILABLE, SUPERSEDED]
-    DeclarationType:
-      type: string
-      enum: [IMPORT, EXPORT, TRANSIT, RE_EXPORT, TEMPORARY_IMPORT]
-    RiskLane:
-      type: string
-      enum: [GREEN, YELLOW, RED]
-    DeclarationCreateRequest:
-      type: object
-      additionalProperties: false
-      description: >-
-        All money amounts are integer minor units of invoice_currency. Duty
-        rates are basis points (0-10000).
-      required: [request_id, declaration_ref, declaration_type, hs_code, goods_description, country_of_origin, port_of_entry, gross_weight_kg, net_weight_kg, number_of_packages, consignee_id, operator_id, invoice_amount_minor, invoice_currency, tariff_bps, vat_bps]
-      properties:
-        request_id: {type: string, minLength: 8, maxLength: 128, description: Idempotency key for the create.}
-        declaration_ref: {type: string, pattern: '^[A-Z0-9][A-Z0-9/-]{3,63}$'}
-        ucr: {type: string, minLength: 8, maxLength: 64}
-        declaration_type: {$ref: '#/components/schemas/DeclarationType'}
-        hs_code: {type: string, description: WCO HS code; normalized at ingestion.}
-        goods_description: {type: string, minLength: 10, maxLength: 4096}
-        country_of_origin: {type: string, pattern: '^[A-Z]{2}$'}
-        country_of_destination: {type: string, pattern: '^[A-Z]{2}$'}
-        port_of_entry: {type: string, minLength: 2, maxLength: 64}
-        gross_weight_kg: {type: integer, minimum: 1}
-        net_weight_kg: {type: integer, minimum: 1, description: Must not exceed gross_weight_kg.}
-        number_of_packages: {type: integer, minimum: 1}
-        consignee_id: {type: string, minLength: 2, maxLength: 128}
-        operator_id: {type: string, minLength: 2, maxLength: 128}
-        is_aeo: {type: boolean}
-        invoice_amount_minor: {type: integer, minimum: 1}
-        freight_amount_minor: {type: integer, minimum: 0}
-        insurance_amount_minor: {type: integer, minimum: 0}
-        invoice_currency: {type: string, pattern: '^[A-Z]{3}$'}
-        tariff_bps: {type: integer, minimum: 0, maximum: 10000}
-        vat_bps: {type: integer, minimum: 0, maximum: 10000}
-        levy_bps: {type: integer, minimum: 0, maximum: 10000}
-        excise_bps: {type: integer, minimum: 0, maximum: 10000}
-    DeclarationAmendmentRequest:
-      allOf:
-        - $ref: '#/components/schemas/DeclarationCreateRequest'
-        - type: object
-          additionalProperties: false
-          required: [expected_version]
-          properties:
-            expected_version: {type: integer, minimum: 1, description: Version of the live revision being amended.}
-    Declaration:
-      type: object
-      required: [declaration_id, tenant_id, request_id, declaration_ref, revision, trader_id, declaration_type, status, hs_code, goods_description, country_of_origin, port_of_entry, gross_weight_kg, net_weight_kg, number_of_packages, consignee_id, operator_id, is_aeo, invoice_amount_minor, freight_amount_minor, insurance_amount_minor, invoice_currency, tariff_bps, vat_bps, levy_bps, excise_bps, created_at, updated_at, version]
-      properties:
-        declaration_id: {type: string}
-        tenant_id: {type: string}
-        request_id: {type: string}
-        declaration_ref: {type: string}
-        ucr: {type: string}
-        revision: {type: integer, minimum: 1}
-        supersedes_id: {type: string}
-        trader_id: {type: string}
-        declaration_type: {$ref: '#/components/schemas/DeclarationType'}
-        status: {$ref: '#/components/schemas/DeclarationStatus'}
-        risk_lane: {$ref: '#/components/schemas/RiskLane'}
-        risk_score: {type: integer}
-        scoring_model: {type: string}
-        scoring_error: {type: string}
-        hs_code: {type: string}
-        goods_description: {type: string}
-        country_of_origin: {type: string}
-        country_of_destination: {type: string}
-        port_of_entry: {type: string}
-        gross_weight_kg: {type: integer}
-        net_weight_kg: {type: integer}
-        number_of_packages: {type: integer}
-        consignee_id: {type: string}
-        operator_id: {type: string}
-        is_aeo: {type: boolean}
-        invoice_amount_minor: {type: integer, description: Integer minor units.}
-        freight_amount_minor: {type: integer, description: Integer minor units.}
-        insurance_amount_minor: {type: integer, description: Integer minor units.}
-        invoice_currency: {type: string}
-        tariff_bps: {type: integer}
-        vat_bps: {type: integer}
-        levy_bps: {type: integer}
-        excise_bps: {type: integer}
-        duty_minor: {type: integer, description: Integer minor units.}
-        vat_minor: {type: integer, description: Integer minor units.}
-        levy_minor: {type: integer, description: Integer minor units.}
-        excise_minor: {type: integer, description: Integer minor units.}
-        total_duty_minor: {type: integer, description: Integer minor units.}
-        rejection_reason: {type: string}
-        submitted_at: {type: string, format: date-time}
-        cleared_at: {type: string, format: date-time}
-        created_at: {type: string, format: date-time}
-        updated_at: {type: string, format: date-time}
-        version: {type: integer, minimum: 1}
-    ClearanceCertificate:
-      type: object
-      required: [certificate_id, declaration_id, certificate_number, issued_by, payload_sha256, issued_at]
-      properties:
-        certificate_id: {type: string}
-        declaration_id: {type: string}
-        certificate_number: {type: string}
-        issued_by: {type: string}
-        payload_sha256: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
-        issued_at: {type: string, format: date-time}
+        userId:
+          type: string
+          description: Verified gateway subject (never caller-supplied)
+        deviceId:
+          type: string
+        token:
+          type: string
+        platform:
+          type: string
+          enum: [android, ios, web]
+        status:
+          type: string
+          enum: [ACTIVE, REVOKED]
+        registeredAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        revokedAt:
+          type: string
+          format: date-time
