@@ -20,6 +20,60 @@ type Claims struct {
 	TenantID string `json:"tenant_id"`
 	Subject  string `json:"sub"`
 	Expires  int64  `json:"exp"`
+	// Roles are the verified platform PBAC roles carried by the token. They
+	// are only ever populated from a verified token payload — never from
+	// request bodies or headers.
+	Roles []string `json:"roles,omitempty"`
+}
+
+// HasRole reports whether the verified claims carry the given platform role.
+func (claims Claims) HasRole(role string) bool {
+	for _, held := range claims.Roles {
+		if held == role {
+			return true
+		}
+	}
+	return false
+}
+
+// HasAnyRole reports whether the verified claims carry at least one of the
+// given platform roles.
+func (claims Claims) HasAnyRole(roles ...string) bool {
+	for _, role := range roles {
+		if claims.HasRole(role) {
+			return true
+		}
+	}
+	return false
+}
+
+// validRole restricts role strings to canonical platform role names.
+func validRole(value string) bool {
+	if len(value) < 2 || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-') {
+			return false
+		}
+	}
+	return value[0] >= 'a' && value[0] <= 'z'
+}
+
+// sanitizeRoles drops malformed role entries and deduplicates; a token
+// carrying only malformed roles verifies with zero roles (fail closed: every
+// role-gated route then denies).
+func sanitizeRoles(roles []string) []string {
+	var clean []string
+	seen := map[string]bool{}
+	for _, role := range roles {
+		if !validRole(role) || seen[role] {
+			continue
+		}
+		seen[role] = true
+		clean = append(clean, role)
+	}
+	return clean
 }
 
 type Verifier struct {
@@ -29,7 +83,14 @@ type Verifier struct {
 	Now      func() time.Time
 }
 
-func Middleware(verifier Verifier, next http.Handler) http.Handler {
+// TokenVerifier is the gateway token verification boundary: the HS256
+// shared-key Verifier (local loopback profile) or the RS256 Keycloak
+// JWKSVerifier (production profile).
+type TokenVerifier interface {
+	Verify(token string) (Claims, error)
+}
+
+func Middleware(verifier TokenVerifier, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if strings.TrimSpace(request.Header.Get("X-Tenant-ID")) != "" {
 			http.Error(response, "caller-supplied tenant header is prohibited", http.StatusBadRequest)
@@ -50,6 +111,21 @@ func Tenant(request context.Context) (Claims, error) {
 		return Claims{}, errors.New("validated tenant context is required")
 	}
 	return claims, nil
+}
+
+// WithClaims attaches already-verified claims to a context. It is used by ingress
+// paths (e.g. the NSW JWS authority ingress) that verify identity through a
+// non-Bearer mechanism and then need the same tenant-scoped storage behaviour.
+func WithClaims(ctx context.Context, claims Claims) (context.Context, error) {
+	if !validTenantID(claims.TenantID) || strings.TrimSpace(claims.Subject) == "" {
+		return nil, errors.New("cannot attach unverified tenant claims")
+	}
+	return context.WithValue(ctx, contextKey{}, claims), nil
+}
+
+// Ready reports whether the verifier has all required fail-closed configuration.
+func (verifier Verifier) Ready() bool {
+	return len(verifier.Key) >= 32 && verifier.Issuer != "" && verifier.Audience != ""
 }
 
 func (verifier Verifier) Verify(token string) (Claims, error) {
@@ -89,6 +165,7 @@ func (verifier Verifier) Verify(token string) (Claims, error) {
 	if json.Unmarshal(payloadJSON, &claims) != nil || !validTenantID(claims.TenantID) || claims.Subject == "" || claims.Issuer != verifier.Issuer || claims.Audience != verifier.Audience {
 		return Claims{}, errors.New("gateway tenant claims rejected")
 	}
+	claims.Roles = sanitizeRoles(claims.Roles)
 	now := time.Now
 	if verifier.Now != nil {
 		now = verifier.Now

@@ -19,11 +19,24 @@ import (
 	"time"
 )
 
+// Claims are the validated payload claims of an NSW authority JWS. NSW ingress is
+// asymmetric-only: shared-secret algorithms (HS*) and "none" are prohibited.
+type Claims struct {
+	Issuer   string `json:"iss"`
+	Audience string `json:"aud"`
+	Subject  string `json:"sub"`
+	TenantID string `json:"tenant_id"`
+	JTI      string `json:"jti"`
+	Expires  int64  `json:"exp"`
+}
+
 type Policy struct {
 	JWKSURL           string
 	PinnedJWKSHA256   string // sha256:<lowercase hex>; empty is prohibited.
 	AllowedAlgorithms map[string]bool
 	AllowedKIDs       map[string]time.Time // KID -> expiry; zero means active without scheduled expiry.
+	ExpectedIssuer    string
+	ExpectedAudience  string
 	MaxClockSkew      time.Duration
 	HTTPClient        *http.Client
 }
@@ -56,6 +69,16 @@ type Verifier struct {
 func New(policy Policy) (*Verifier, error) {
 	if !strings.HasPrefix(policy.JWKSURL, "https://") || !strings.HasPrefix(policy.PinnedJWKSHA256, "sha256:") || len(policy.AllowedAlgorithms) == 0 || len(policy.AllowedKIDs) == 0 {
 		return nil, errors.New("JWKS policy must pin HTTPS authority source, digest, algorithms and KIDs")
+	}
+	for algorithm := range policy.AllowedAlgorithms {
+		// NSW authority ingress must never accept shared-secret or unsigned tokens:
+		// a leaked HMAC key would let any holder forge authority messages.
+		if algorithm != "RS256" {
+			return nil, fmt.Errorf("NSW ingress algorithm %q is prohibited: asymmetric RS256 only", algorithm)
+		}
+	}
+	if strings.TrimSpace(policy.ExpectedIssuer) == "" || strings.TrimSpace(policy.ExpectedAudience) == "" {
+		return nil, errors.New("JWKS policy must pin the expected issuer and audience")
 	}
 	if policy.MaxClockSkew <= 0 {
 		policy.MaxClockSkew = time.Minute
@@ -112,45 +135,70 @@ func (v *Verifier) Refresh(ctx context.Context) error {
 	return nil
 }
 
-func (v *Verifier) Verify(ctx context.Context, compact string, now time.Time) error {
+// Verify validates the compact JWS signature AND its payload claims
+// (iss, aud, exp with clock skew, mandatory jti and tenant binding).
+func (v *Verifier) Verify(ctx context.Context, compact string, now time.Time) (Claims, error) {
 	parts := strings.Split(compact, ".")
 	if len(parts) != 3 {
-		return errors.New("JWS must use compact serialization")
+		return Claims{}, errors.New("JWS must use compact serialization")
 	}
 	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return errors.New("invalid JWS protected header")
+		return Claims{}, errors.New("invalid JWS protected header")
 	}
 	var header protectedHeader
 	if json.Unmarshal(headerBytes, &header) != nil || !v.policy.AllowedAlgorithms[header.Alg] || header.KID == "" {
-		return errors.New("JWS protected header violates algorithm/KID policy")
+		return Claims{}, errors.New("JWS protected header violates algorithm/KID policy")
 	}
 	if expiry, allowed := v.policy.AllowedKIDs[header.KID]; !allowed || (!expiry.IsZero() && now.After(expiry)) {
-		return errors.New("JWS KID is not active")
+		return Claims{}, errors.New("JWS KID is not active")
 	}
 	v.mu.RLock()
 	key := v.cache.keys[header.KID]
 	v.mu.RUnlock()
 	if key == nil {
 		if err := v.Refresh(ctx); err != nil {
-			return err
+			return Claims{}, err
 		}
 		v.mu.RLock()
 		key = v.cache.keys[header.KID]
 		v.mu.RUnlock()
 	}
 	if key == nil {
-		return errors.New("JWS KID missing from pinned authority JWKS")
+		return Claims{}, errors.New("JWS KID missing from pinned authority JWKS")
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
-		return errors.New("invalid JWS signature")
+		return Claims{}, errors.New("invalid JWS signature")
 	}
 	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
-	if header.Alg != "RS256" {
-		return errors.New("only RS256 is implemented by this verifier")
+	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], sig); err != nil {
+		return Claims{}, errors.New("JWS signature verification failed")
 	}
-	return rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], sig)
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return Claims{}, errors.New("invalid JWS payload")
+	}
+	var claims Claims
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return Claims{}, errors.New("undecodable JWS payload claims")
+	}
+	if claims.Issuer != v.policy.ExpectedIssuer {
+		return Claims{}, errors.New("JWS issuer is not the pinned NSW authority")
+	}
+	if claims.Audience != v.policy.ExpectedAudience {
+		return Claims{}, errors.New("JWS audience does not name this service")
+	}
+	if strings.TrimSpace(claims.JTI) == "" {
+		return Claims{}, errors.New("JWS is missing its replay identity (jti)")
+	}
+	if strings.TrimSpace(claims.TenantID) == "" || !strings.HasPrefix(claims.TenantID, "tenant-") {
+		return Claims{}, errors.New("JWS is missing a valid tenant binding")
+	}
+	if claims.Expires == 0 || now.After(time.Unix(claims.Expires, 0).Add(v.policy.MaxClockSkew)) {
+		return Claims{}, errors.New("JWS authority message expired")
+	}
+	return claims, nil
 }
 
 func rsaKey(item jwk) (*rsa.PublicKey, error) {

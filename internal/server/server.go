@@ -3,28 +3,185 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/cruise"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/declarations"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/manifests"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/offshore"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/securechain"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/tariff"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
 
-type Server struct {
-	store *portcall.Store
+// Config wires every security and integration dependency. New fails closed
+// when any of them is missing.
+type Config struct {
+	Store        *portcall.Store
+	Bookings     *booking.Store
+	Queues       *queue.Store
+	Declarations *declarations.Store
+	// SecureChains is the WP-7 verified-chain container release store;
+	// mandatory — the release surface fails closed without it.
+	SecureChains *securechain.Store
+	// Vessel-operations stores (W-FEAT-6): offshore terminal calls, cruise
+	// calls, API/BRI manifests and the shared tariff schedule store. All are
+	// mandatory — a partial vessel-ops surface fails closed at boot.
+	Offshore  *offshore.Store
+	Cruise    *cruise.Store
+	Manifests *manifests.Store
+	Tariffs   *tariff.Store
+	// DeclarationScorer is the fail-closed risk-scoring boundary; declaration
+	// submission cannot proceed without it.
+	DeclarationScorer declarations.Scorer
+	// DeclarationHighValueMinor is the high-value shipment threshold (invoice
+	// currency minor units) for the risk-lane rules; 0 disables it.
+	DeclarationHighValueMinor int64
+	Payments                  payments.Gateway
+	Orchestrator              booking.Orchestrator
+	CallUps                   queue.CallUpOrchestrator
+	AuthMode                  string
+	TenantGateway             tenantctx.Verifier
+	// TenantGatewayJWKS, when set, replaces the HS256 shared-key verifier with
+	// RS256 Keycloak JWKS verification (production profile).
+	TenantGatewayJWKS *tenantctx.JWKSVerifier
+	NSWVerifier       *nswsecurity.Verifier
+	Pool              *pgxpool.Pool
+	// FGNShareBasisPoints is the FGN levy split out of each booking amount.
+	FGNShareBasisPoints int64
+	// NSWReplayTTL bounds how long ingress replay hashes are retained.
+	NSWReplayTTL time.Duration
 }
 
-func New(store *portcall.Store, authMode string) http.Handler {
-	server := &Server{store: store}
+type Server struct {
+	store                     *portcall.Store
+	bookings                  *booking.Store
+	queues                    *queue.Store
+	declarations              *declarations.Store
+	secureChains              *securechain.Store
+	offshore                  *offshore.Store
+	cruise                    *cruise.Store
+	manifests                 *manifests.Store
+	tariffs                   *tariff.Store
+	declarationScorer         declarations.Scorer
+	declarationHighValueMinor int64
+	payments                  payments.Gateway
+	orchestrator              booking.Orchestrator
+	callUps                   queue.CallUpOrchestrator
+	fgnShareBPS               int64
+}
+
+func New(config Config) (http.Handler, error) {
+	if config.Store == nil || config.Bookings == nil || config.Queues == nil || config.Declarations == nil || config.Pool == nil {
+		return nil, errors.New("server requires port-call, booking, queue and declaration stores")
+	}
+	if config.SecureChains == nil {
+		return nil, errors.New("server requires a secure-chain store")
+	}
+	if config.Offshore == nil || config.Cruise == nil || config.Manifests == nil || config.Tariffs == nil {
+		return nil, errors.New("server requires offshore, cruise, manifest and tariff stores")
+	}
+	if config.Payments == nil || config.Orchestrator == nil || config.CallUps == nil {
+		return nil, errors.New("server requires a payments gateway and workflow orchestrators")
+	}
+	if config.DeclarationScorer == nil {
+		return nil, errors.New("server requires a fail-closed declaration risk scorer")
+	}
+	if config.TenantGatewayJWKS == nil && !config.TenantGateway.Ready() {
+		return nil, errors.New("tenant gateway verifier is not configured (key >= 32 bytes, issuer, audience)")
+	}
+	if config.NSWVerifier == nil || config.Pool == nil || config.NSWReplayTTL <= 0 {
+		return nil, errors.New("NSW ingress requires verifier, database pool and replay TTL")
+	}
+	if config.FGNShareBasisPoints <= 0 || config.FGNShareBasisPoints >= 10000 {
+		return nil, errors.New("FGN_SHARE_BASIS_POINTS must be between 1 and 9999")
+	}
+	server := &Server{
+		store:                     config.Store,
+		bookings:                  config.Bookings,
+		queues:                    config.Queues,
+		declarations:              config.Declarations,
+		secureChains:              config.SecureChains,
+		offshore:                  config.Offshore,
+		cruise:                    config.Cruise,
+		manifests:                 config.Manifests,
+		tariffs:                   config.Tariffs,
+		declarationScorer:         config.DeclarationScorer,
+		declarationHighValueMinor: config.DeclarationHighValueMinor,
+		payments:                  config.Payments,
+		orchestrator:              config.Orchestrator,
+		callUps:                   config.CallUps,
+		fgnShareBPS:               config.FGNShareBasisPoints,
+	}
 	api := http.NewServeMux()
 	api.HandleFunc("GET /v1/partner-capabilities", server.partnerCapabilities)
 	api.HandleFunc("POST /v1/agency-profiles", server.registerAgencyProfile)
 	api.HandleFunc("POST /v1/port-calls", server.create)
 	api.HandleFunc("GET /v1/port-calls/", server.get)
 	api.HandleFunc("POST /v1/port-calls/", server.transition)
+	api.HandleFunc("POST /v1/terminals", server.createTerminal)
+	api.HandleFunc("POST /v1/slots", server.createSlot)
+	api.HandleFunc("GET /v1/slots", server.listSlots)
+	api.HandleFunc("POST /v1/bookings", server.createBooking)
+	api.HandleFunc("GET /v1/bookings/", server.bookingRead)
+	api.HandleFunc("POST /v1/bookings/", server.bookingOperation)
+	api.HandleFunc("POST /v1/gate/scans", server.gateScan)
+	api.HandleFunc("POST /v1/queue-requests", server.createQueueRequest)
+	api.HandleFunc("GET /v1/queue-requests/", server.queueRead)
+	api.HandleFunc("POST /v1/queue-requests/", server.queueOperation)
+	api.HandleFunc("GET /v1/terminals/", server.terminalQueue)
+	api.HandleFunc("POST /v1/declarations", server.createDeclaration)
+	api.HandleFunc("POST /v1/secure-chain/bl-registry", server.registerBLAuthority)
+	api.HandleFunc("POST /v1/secure-chain/consume", server.consumeRelease)
+	api.HandleFunc("POST /v1/secure-chains", server.createSecureChain)
+	api.HandleFunc("GET /v1/secure-chains/", server.secureChainRead)
+	api.HandleFunc("POST /v1/secure-chains/", server.secureChainOperation)
+	api.HandleFunc("GET /v1/secure-chain/", server.releaseAuthorization)
+	api.HandleFunc("GET /v1/declarations", server.listDeclarations)
+	api.HandleFunc("GET /v1/declarations/", server.declarationRead)
+	api.HandleFunc("POST /v1/declarations/", server.declarationOperation)
+	api.HandleFunc("POST /v1/tariff-schedules", server.registerTariffSchedule)
+	api.HandleFunc("POST /v1/offshore-calls", server.createOffshoreCall)
+	api.HandleFunc("GET /v1/offshore-calls/", server.offshoreCallRead)
+	api.HandleFunc("POST /v1/offshore-calls/", server.offshoreCallOperation)
+	api.HandleFunc("POST /v1/manifests", server.ingestManifest)
+	api.HandleFunc("GET /v1/manifests/", server.manifestRead)
+	api.HandleFunc("GET /v1/manifest-rejections", server.manifestRejections)
+	api.HandleFunc("POST /v1/cruise-calls", server.createCruiseCall)
+	api.HandleFunc("GET /v1/cruise-calls/", server.cruiseCallRead)
+	api.HandleFunc("POST /v1/cruise-calls/", server.cruiseCallOperation)
+
+	nswIngress, err := nswsecurity.NewIngress(nswsecurity.IngressConfig{
+		SignatureHeader: "X-NSW-Signature",
+		Verifier:        config.NSWVerifier,
+		ReplayStore:     &pgReplayStore{pool: config.Pool},
+		ReplayTTL:       config.NSWReplayTTL,
+	}, http.HandlerFunc(server.nswPortCall))
+	if err != nil {
+		return nil, fmt.Errorf("build NSW ingress: %w", err)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", server.health)
-	mux.Handle("/v1/", requireAuthentication(authMode, api))
-	return requestLimit(mux)
+	// Tenant middleware (HS256 gateway token) protects all tenant API routes.
+	var tenantVerifier tenantctx.TokenVerifier = config.TenantGateway
+	if config.TenantGatewayJWKS != nil {
+		tenantVerifier = config.TenantGatewayJWKS
+	}
+	mux.Handle("/v1/", requireAuthentication(config.AuthMode, tenantctx.Middleware(tenantVerifier, api)))
+	// NSW ingress uses asymmetric JWS authority signatures instead of the
+	// gateway token; it is mounted last so the more specific pattern wins.
+	mux.Handle("POST /v1/nsw/port-calls", requireAuthentication(config.AuthMode, nswIngress))
+	return requestLimit(mux), nil
 }
 
 func requestLimit(next http.Handler) http.Handler {
@@ -73,6 +230,41 @@ func (server *Server) create(response http.ResponseWriter, request *http.Request
 		return
 	}
 	call, err := server.store.Create(request.Context(), idempotencyKey, input)
+	if err != nil {
+		writePortCallError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusCreated, call)
+}
+
+// nswPortCall is the downstream handler of the NSW JWS ingress: the authority
+// message was signature-verified and replay-checked, its claims become the
+// tenant context, and the jti doubles as the port-call idempotency key.
+func (server *Server) nswPortCall(response http.ResponseWriter, request *http.Request) {
+	nswClaims, err := nswsecurity.ClaimsFrom(request.Context())
+	if err != nil {
+		writeError(response, http.StatusUnauthorized, "verified NSW authority claims are required")
+		return
+	}
+	ctx, err := tenantctx.WithClaims(request.Context(), tenantctx.Claims{
+		Issuer:   nswClaims.Issuer,
+		Audience: nswClaims.Audience,
+		TenantID: nswClaims.TenantID,
+		Subject:  nswClaims.Subject,
+		Expires:  nswClaims.Expires,
+	})
+	if err != nil {
+		writeError(response, http.StatusUnauthorized, "NSW tenant claims are not valid for storage")
+		return
+	}
+	var input portcall.CreateRequest
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		writeError(response, http.StatusBadRequest, "invalid NSW port-call JSON")
+		return
+	}
+	call, err := server.store.Create(ctx, nswClaims.JTI, input)
 	if err != nil {
 		writePortCallError(response, err)
 		return
@@ -167,11 +359,13 @@ func (server *Server) declareDocument(response http.ResponseWriter, request *htt
 	writeJSON(response, http.StatusCreated, document)
 }
 
+// clearanceRequest carries no actor identity: the deciding officer is always
+// the verified token subject. A body-supplied decided_by is rejected as an
+// unknown field.
 type clearanceRequest struct {
 	ExpectedVersion int64                      `json:"expected_version"`
 	Decision        portcall.ClearanceDecision `json:"decision"`
 	Reason          string                     `json:"reason"`
-	DecidedBy       string                     `json:"decided_by"`
 }
 
 func (server *Server) reviewDocument(response http.ResponseWriter, request *http.Request, callID string) {
@@ -215,6 +409,10 @@ func (server *Server) supersedeDocument(response http.ResponseWriter, request *h
 }
 
 func (server *Server) amendClearance(response http.ResponseWriter, request *http.Request, callID string) {
+	claims, ok := claimsOf(response, request)
+	if !ok {
+		return
+	}
 	var input portcall.ClearanceAmendmentRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -222,6 +420,9 @@ func (server *Server) amendClearance(response http.ResponseWriter, request *http
 		writeError(response, http.StatusBadRequest, "invalid clearance amendment JSON")
 		return
 	}
+	// The amending officer is the verified token subject; any body-supplied
+	// amended_by is overridden, never trusted.
+	input.AmendedBy = claims.Subject
 	clearance, err := server.store.AmendClearance(request.Context(), callID, input)
 	if err != nil {
 		writePortCallError(response, err)
@@ -231,6 +432,10 @@ func (server *Server) amendClearance(response http.ResponseWriter, request *http
 }
 
 func (server *Server) decideClearance(response http.ResponseWriter, request *http.Request, callID string) {
+	claims, ok := claimsOf(response, request)
+	if !ok {
+		return
+	}
 	var input clearanceRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
@@ -238,7 +443,7 @@ func (server *Server) decideClearance(response http.ResponseWriter, request *htt
 		writeError(response, http.StatusBadRequest, "expected_version must be a positive integer")
 		return
 	}
-	clearance, err := server.store.DecideClearance(request.Context(), callID, input.ExpectedVersion, input.Decision, input.Reason, input.DecidedBy)
+	clearance, err := server.store.DecideClearance(request.Context(), callID, input.ExpectedVersion, input.Decision, input.Reason, claims.Subject)
 	if err != nil {
 		writePortCallError(response, err)
 		return
@@ -258,6 +463,25 @@ func writePortCallError(response http.ResponseWriter, err error) {
 		writeError(response, http.StatusUnprocessableEntity, err.Error())
 	default:
 		writeError(response, http.StatusInternalServerError, "internal port-call failure")
+	}
+}
+
+func writeBookingError(response http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, booking.ErrNotFound):
+		writeError(response, http.StatusNotFound, err.Error())
+	case errors.Is(err, booking.ErrIdempotencyConflict), errors.Is(err, booking.ErrOptimisticConflict),
+		errors.Is(err, booking.ErrInvalidTransition), errors.Is(err, booking.ErrSlotUnavailable),
+		errors.Is(err, booking.ErrPaymentReceiptReuse):
+		writeError(response, http.StatusConflict, err.Error())
+	case errors.Is(err, booking.ErrSlotWindow), errors.Is(err, booking.ErrPaymentInvalid):
+		writeError(response, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, booking.ErrGateDenied):
+		writeError(response, http.StatusForbidden, err.Error())
+	case errors.Is(err, booking.ErrRefundUnavailable):
+		writeError(response, http.StatusServiceUnavailable, err.Error())
+	default:
+		writeError(response, http.StatusInternalServerError, "internal booking failure")
 	}
 }
 
