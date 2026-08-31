@@ -18,6 +18,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/securechain"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tariff"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
@@ -29,6 +30,9 @@ type Config struct {
 	Bookings     *booking.Store
 	Queues       *queue.Store
 	Declarations *declarations.Store
+	// SecureChains is the WP-7 verified-chain container release store;
+	// mandatory — the release surface fails closed without it.
+	SecureChains *securechain.Store
 	// Vessel-operations stores (W-FEAT-6): offshore terminal calls, cruise
 	// calls, API/BRI manifests and the shared tariff schedule store. All are
 	// mandatory — a partial vessel-ops surface fails closed at boot.
@@ -63,6 +67,7 @@ type Server struct {
 	bookings                  *booking.Store
 	queues                    *queue.Store
 	declarations              *declarations.Store
+	secureChains              *securechain.Store
 	offshore                  *offshore.Store
 	cruise                    *cruise.Store
 	manifests                 *manifests.Store
@@ -78,6 +83,9 @@ type Server struct {
 func New(config Config) (http.Handler, error) {
 	if config.Store == nil || config.Bookings == nil || config.Queues == nil || config.Declarations == nil || config.Pool == nil {
 		return nil, errors.New("server requires port-call, booking, queue and declaration stores")
+	}
+	if config.SecureChains == nil {
+		return nil, errors.New("server requires a secure-chain store")
 	}
 	if config.Offshore == nil || config.Cruise == nil || config.Manifests == nil || config.Tariffs == nil {
 		return nil, errors.New("server requires offshore, cruise, manifest and tariff stores")
@@ -102,6 +110,7 @@ func New(config Config) (http.Handler, error) {
 		bookings:                  config.Bookings,
 		queues:                    config.Queues,
 		declarations:              config.Declarations,
+		secureChains:              config.SecureChains,
 		offshore:                  config.Offshore,
 		cruise:                    config.Cruise,
 		manifests:                 config.Manifests,
@@ -131,6 +140,12 @@ func New(config Config) (http.Handler, error) {
 	api.HandleFunc("POST /v1/queue-requests/", server.queueOperation)
 	api.HandleFunc("GET /v1/terminals/", server.terminalQueue)
 	api.HandleFunc("POST /v1/declarations", server.createDeclaration)
+	api.HandleFunc("POST /v1/secure-chain/bl-registry", server.registerBLAuthority)
+	api.HandleFunc("POST /v1/secure-chain/consume", server.consumeRelease)
+	api.HandleFunc("POST /v1/secure-chains", server.createSecureChain)
+	api.HandleFunc("GET /v1/secure-chains/", server.secureChainRead)
+	api.HandleFunc("POST /v1/secure-chains/", server.secureChainOperation)
+	api.HandleFunc("GET /v1/secure-chain/", server.releaseAuthorization)
 	api.HandleFunc("GET /v1/declarations", server.listDeclarations)
 	api.HandleFunc("GET /v1/declarations/", server.declarationRead)
 	api.HandleFunc("POST /v1/declarations/", server.declarationOperation)

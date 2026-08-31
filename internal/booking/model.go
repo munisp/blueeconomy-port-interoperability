@@ -111,6 +111,7 @@ var (
 	terminalPattern       = regexp.MustCompile(`^[A-Z][A-Z0-9-]{1,31}$`)
 	portCodePattern       = regexp.MustCompile(`^[A-Z]{2,8}$`)
 	declarationRefPattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9/-]{3,63}$`)
+	containerIDPattern    = regexp.MustCompile(`^[A-Z]{4}[0-9]{7}$`)
 )
 
 type CreateRequest struct {
@@ -127,6 +128,10 @@ type CreateRequest struct {
 	DeclaredWeightKg    int64  `json:"declared_weight_kg,omitempty"`
 	ConsigneeID         string `json:"consignee_id,omitempty"`
 	OperatorID          string `json:"operator_id,omitempty"`
+	// ContainerID binds the booking to an import container (ISO 6346). When
+	// present, the Secure Chain (WP-7) verified-chain tail-holder check
+	// gates booking creation — PIN-free container release.
+	ContainerID string `json:"container_id,omitempty"`
 }
 
 type Booking struct {
@@ -149,6 +154,7 @@ type Booking struct {
 	DeclaredWeightKg     *int64    `json:"declared_weight_kg,omitempty"`
 	ConsigneeID          *string   `json:"consignee_id,omitempty"`
 	OperatorID           *string   `json:"operator_id,omitempty"`
+	ContainerID          *string   `json:"container_id,omitempty"`
 	PaymentReceiptRef    *string   `json:"payment_receipt_ref,omitempty"`
 	GateID               *string   `json:"gate_id,omitempty"`
 	LedgerCommitHash     *string   `json:"ledger_commit_hash,omitempty"`
@@ -214,6 +220,9 @@ func (request CreateRequest) Validate() error {
 	}
 	if request.ExpiresAt.IsZero() || request.ExpiresAt.Before(time.Now().UTC()) {
 		return errors.New("expires_at must be in the future")
+	}
+	if request.ContainerID != "" && !containerIDPattern.MatchString(request.ContainerID) {
+		return errors.New("container_id must be an ISO 6346 container number")
 	}
 	if request.CargoDeclarationRef == "" {
 		if request.DeclaredWeightKg != 0 || request.ConsigneeID != "" || request.OperatorID != "" {

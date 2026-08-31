@@ -21,6 +21,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/securechain"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tariff"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
@@ -33,6 +34,17 @@ func mustManifestStore() *manifests.Store {
 		panic(err)
 	}
 	store, err := manifests.NewStore(nil, mustSigner(), public, "manifest-authority-")
+	if err != nil {
+		panic(err)
+	}
+	return store
+}
+
+// mustSecureChainStore builds a secure-chain store without a database for
+// fail-closed constructor tests; secure-chain routes are exercised against
+// PostgreSQL in the securechain package tests.
+func mustSecureChainStore() *securechain.Store {
+	store, err := securechain.NewStore(nil, mustSigner(), securechain.Config{})
 	if err != nil {
 		panic(err)
 	}
@@ -107,6 +119,7 @@ func testConfig() Config {
 		Offshore:          offshore.NewStore(nil, mustSigner()),
 		Cruise:            cruise.NewStore(nil, mustSigner()),
 		Manifests:         mustManifestStore(),
+		SecureChains:      mustSecureChainStore(),
 		Tariffs:           tariff.NewStore(nil, mustSigner()),
 		DeclarationScorer: fakeScorer{},
 		Payments:          fakePayments{},

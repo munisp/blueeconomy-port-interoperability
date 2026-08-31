@@ -33,10 +33,25 @@ type CapacityListener interface {
 	CapacityReleased(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, terminalID string, principal Principal) error
 }
 
+// ReleaseVerifier is the Secure Chain (WP-7) boundary: a booking bound to an
+// import container is only creatable by the verified chain tail holder. The
+// securechain package implements it; the check runs inside the booking
+// transaction so a chain revocation between check and insert cannot race.
+type ReleaseVerifier interface {
+	VerifyReleaseHolder(ctx context.Context, tx pgx.Tx, containerID, orgID string) error
+}
+
+// ErrReleaseVerifierMissing fails closed when a container-bound booking is
+// attempted without a wired Secure Chain verifier.
+var ErrReleaseVerifierMissing = errors.New("secure-chain release verifier is not wired; container bookings are refused")
+
 type Store struct {
 	pool     *pgxpool.Pool
 	signer   *events.Signer
 	listener CapacityListener
+	// releaseVerifier gates import-container bookings on the verified
+	// secure-chain tail (WP-7); nil refuses container bookings fail-closed.
+	releaseVerifier ReleaseVerifier
 	// refunder posts the compensating settlement transfer when a paid
 	// booking is cancelled or expires; fgnShareBPS reproduces the exact
 	// operator/FGN split used at settlement time.
@@ -56,6 +71,12 @@ func NewStore(pool *pgxpool.Pool, signer *events.Signer) *Store {
 // disables it; releases then leave queue promotion to the sweeper.
 func (store *Store) SetCapacityListener(listener CapacityListener) {
 	store.listener = listener
+}
+
+// SetReleaseVerifier wires the Secure Chain tail-holder check for
+// container-bound bookings. A nil verifier keeps container bookings refused.
+func (store *Store) SetReleaseVerifier(verifier ReleaseVerifier) {
+	store.releaseVerifier = verifier
 }
 
 // SetRefundPoster wires the refund rail. Once wired, cancelling or expiring
@@ -144,7 +165,7 @@ func (store *Store) withTx(ctx context.Context, work func(pgx.Tx, tenantctx.Clai
 
 const bookingColumns = `booking_id, tenant_id, request_id, truck_plate, trucker_msisdn, terminal_id,
 	created_by, slot_id, channel, status, amount_kobo, currency, cargo_declaration_ref, declared_weight_kg,
-	consignee_id, operator_id, payment_receipt_ref, gate_id,
+	consignee_id, operator_id, container_id, payment_receipt_ref, gate_id,
 	ledger_commit_hash, reconciliation_reason, created_at, updated_at, expires_at, version`
 
 func scanBooking(row pgx.Row) (Booking, error) {
@@ -152,7 +173,7 @@ func scanBooking(row pgx.Row) (Booking, error) {
 	err := row.Scan(&booking.BookingID, &booking.TenantID, &booking.RequestID, &booking.TruckPlate,
 		&booking.TruckerMSISDN, &booking.TerminalID, &booking.CreatedBy, &booking.SlotID, &booking.Channel, &booking.Status,
 		&booking.AmountKobo, &booking.Currency, &booking.CargoDeclarationRef, &booking.DeclaredWeightKg,
-		&booking.ConsigneeID, &booking.OperatorID, &booking.PaymentReceiptRef, &booking.GateID,
+		&booking.ConsigneeID, &booking.OperatorID, &booking.ContainerID, &booking.PaymentReceiptRef, &booking.GateID,
 		&booking.LedgerCommitHash, &booking.ReconciliationReason, &booking.CreatedAt, &booking.UpdatedAt,
 		&booking.ExpiresAt, &booking.Version)
 	return booking, err
@@ -212,6 +233,15 @@ func (store *Store) CreateTerminal(ctx context.Context, terminalID, portCode, na
 		}
 		return nil
 	})
+}
+
+// containerIDPtr converts the optional import-container binding into a
+// nullable column value.
+func containerIDPtr(containerID string) *string {
+	if containerID == "" {
+		return nil
+	}
+	return &containerID
 }
 
 // declarationBinding converts the optional customs declaration fields of a
@@ -361,6 +391,17 @@ func (store *Store) createTx(ctx context.Context, tx pgx.Tx, claims tenantctx.Cl
 	if !terminalActive {
 		return Booking{}, errors.New("terminal is not active")
 	}
+	// Secure Chain (WP-7): an import-container booking is only bookable by
+	// the verified chain tail holder. The check runs inside this transaction
+	// and fails closed when no release verifier is wired.
+	if request.ContainerID != "" {
+		if store.releaseVerifier == nil {
+			return Booking{}, ErrReleaseVerifierMissing
+		}
+		if err := store.releaseVerifier.VerifyReleaseHolder(ctx, tx, request.ContainerID, claims.Subject); err != nil {
+			return Booking{}, err
+		}
+	}
 	status := StatusDrafted
 	if request.Channel == ChannelOffline {
 		status = StatusPendingSync
@@ -371,13 +412,13 @@ func (store *Store) createTx(ctx context.Context, tx pgx.Tx, claims tenantctx.Cl
 		INSERT INTO truck_bookings (
 			booking_id, tenant_id, request_id, truck_plate, trucker_msisdn, terminal_id,
 			created_by, channel, status, amount_kobo, currency, cargo_declaration_ref, declared_weight_kg,
-			consignee_id, operator_id, created_at, updated_at, expires_at, version
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'NGN',$11,$12,$13,$14,$15,$15,$16,1)
+			consignee_id, operator_id, container_id, created_at, updated_at, expires_at, version
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'NGN',$11,$12,$13,$14,$15,$16,$16,$17,1)
 		ON CONFLICT (tenant_id, request_id) DO NOTHING
 		RETURNING `+bookingColumns,
 		uuid.New(), claims.TenantID, request.RequestID, request.TruckPlate, request.TruckerMSISDN,
 		request.TerminalID, principal.ID, request.Channel, status, request.AmountKobo, declarationRef, declaredWeight,
-		consigneeID, operatorID, now, request.ExpiresAt.UTC()))
+		consigneeID, operatorID, containerIDPtr(request.ContainerID), now, request.ExpiresAt.UTC()))
 	if errors.Is(err, pgx.ErrNoRows) {
 		existing, lookupErr := scanBooking(tx.QueryRow(ctx, `SELECT `+bookingColumns+` FROM truck_bookings WHERE tenant_id=$1 AND request_id=$2 FOR UPDATE`, claims.TenantID, request.RequestID))
 		if lookupErr != nil {
@@ -386,7 +427,8 @@ func (store *Store) createTx(ctx context.Context, tx pgx.Tx, claims tenantctx.Cl
 		if existing.TruckPlate != request.TruckPlate || existing.TruckerMSISDN != request.TruckerMSISDN ||
 			existing.TerminalID != request.TerminalID || existing.Channel != request.Channel || existing.AmountKobo != request.AmountKobo ||
 			!equalStringPtr(existing.CargoDeclarationRef, declarationRef) || !equalInt64Ptr(existing.DeclaredWeightKg, declaredWeight) ||
-			!equalStringPtr(existing.ConsigneeID, consigneeID) || !equalStringPtr(existing.OperatorID, operatorID) {
+			!equalStringPtr(existing.ConsigneeID, consigneeID) || !equalStringPtr(existing.OperatorID, operatorID) ||
+			!equalStringPtr(existing.ContainerID, containerIDPtr(request.ContainerID)) {
 			return Booking{}, ErrIdempotencyConflict
 		}
 		return existing, nil

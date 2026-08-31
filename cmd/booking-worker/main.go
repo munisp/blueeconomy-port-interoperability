@@ -23,6 +23,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/ledger"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/securechain"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/telemetry"
 	"go.temporal.io/sdk/client"
 	temporalotel "go.temporal.io/sdk/contrib/opentelemetry"
@@ -146,6 +147,19 @@ func run() error {
 	}
 	callUpActivities, err := queue.NewCallUpActivities(queueStore)
 	if err != nil {
+		return fmt.Errorf("configure call-up activities: %w", err)
+	}
+	// Secure Chain (WP-7) expiry sweep: the per-tenant workflow expires
+	// ACTIVE chains past their TTL and revokes their open links.
+	secureChainStore, err := securechain.NewStore(pool, envelopeSigner, securechain.Config{})
+	if err != nil {
+		return fmt.Errorf("configure secure-chain store: %w", err)
+	}
+	expiryActivities, err := securechain.NewExpiryActivities(secureChainStore)
+	if err != nil {
+		return fmt.Errorf("configure secure-chain expiry activities: %w", err)
+	}
+	if err != nil {
 		return err
 	}
 	// Temporal OTel interceptors: workflow/activity spans join the service
@@ -175,6 +189,8 @@ func run() error {
 	})
 	bookingWorker.RegisterWorkflow(booking.ECallUpBookingWorkflow)
 	bookingWorker.RegisterWorkflow(queue.ECallUpCallUpWorkflow)
+	bookingWorker.RegisterWorkflow(securechain.SecureChainExpiryWorkflow)
+	bookingWorker.RegisterActivity(expiryActivities)
 	bookingWorker.RegisterActivity(activities)
 	bookingWorker.RegisterActivity(callUpActivities)
 

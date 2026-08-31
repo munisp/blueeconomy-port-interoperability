@@ -304,6 +304,191 @@ paths:
         '404': {description: Declaration not found.}
         '409': {description: Version conflict or the declaration is not amendable.}
         '422': {description: Amended content failed validation.}
+  /v1/secure-chain/bl-registry:
+    post:
+      operationId: registerSecureChainBLAuthority
+      description: >-
+        Secure Chain (WP-7): records the calling shipping line's release
+        authority over a bill-of-lading digest (SHA-256 of the carrier
+        manifest record) and container. The shipping line is the verified
+        token subject; no PIN or shared secret exists anywhere in the flow.
+        Requires the shipping-line role.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [container_id, bl_digest]
+              properties:
+                container_id: {type: string, pattern: '^[A-Z]{4}[0-9]{7}$', description: ISO 6346 container number.}
+                bl_digest: {type: string, pattern: '^[0-9a-f]{64}$', description: SHA-256 of the carrier B/L manifest record.}
+      responses:
+        '201': {description: Release authority registered.}
+        '400': {description: Invalid request.}
+        '403': {description: shipping-line role required.}
+  /v1/secure-chains:
+    post:
+      operationId: createSecureChain
+      description: >-
+        Opens a verified release chain for an import container. The caller
+        must hold B/L release authority (bl-registry) and becomes the first
+        chain tail. Idempotent on the Idempotency-Key header; one ACTIVE
+        chain per container is DB-enforced. Requires the shipping-line role.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}, {$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [container_id, bl_digest, expires_at]
+              properties:
+                container_id: {type: string, pattern: '^[A-Z]{4}[0-9]{7}$'}
+                bl_digest: {type: string, pattern: '^[0-9a-f]{64}$'}
+                expires_at: {type: string, format: date-time}
+      responses:
+        '201': {description: Release chain created (ACTIVE).}
+        '400': {description: Invalid request or missing Idempotency-Key.}
+        '403': {description: No B/L release authority or shipping-line role required.}
+        '409': {description: Idempotency key conflicts with a retained chain.}
+        '422': {description: An ACTIVE chain already exists for the container.}
+  /v1/secure-chains/{container_id}:
+    get:
+      operationId: getSecureChain
+      description: Returns the most recent release chain for a container with its hash-chained links.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '200': {description: The release chain with links.}
+        '404': {description: Not found.}
+  /v1/secure-chains/{chain_id}/nominations:
+    post:
+      operationId: nominateSecureChainLink
+      description: >-
+        The current verified chain tail nominates the next organisation
+        (line → forwarder → transporter). The nominator is the verified token
+        subject; the link is appended to the hash-chained, append-only link
+        ledger. A pending nomination blocks further nominations until
+        resolved. Velocity-anomaly policy may flag or hold the chain.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to_org]
+              properties:
+                to_org: {type: string, description: Organisation identifier of the next chain holder.}
+      responses:
+        '201': {description: Link nominated (PENDING).}
+        '403': {description: Caller does not hold the verified chain tail.}
+        '422': {description: Chain not ACTIVE, on velocity hold, or a nomination is pending.}
+  /v1/secure-chains/{chain_id}/links/{seq}/accept:
+    post:
+      operationId: acceptSecureChainLink
+      description: The nominated organisation explicitly accepts the pending link; the tail moves to it.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '200': {description: Link accepted (ACCEPTED).}
+        '403': {description: Caller is not the nominated organisation.}
+        '422': {description: No pending nomination at this seq.}
+  /v1/secure-chains/{chain_id}/links/{seq}/decline:
+    post:
+      operationId: declineSecureChainLink
+      description: The nominated organisation declines; the chain tail returns to the nominator.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: {type: string}
+      responses:
+        '200': {description: Link declined (DECLINED).}
+        '403': {description: Caller is not the nominated organisation.}
+        '422': {description: No pending nomination at this seq.}
+  /v1/secure-chains/{chain_id}/revoke:
+    post:
+      operationId: revokeSecureChain
+      description: >-
+        The issuing shipping line revokes the chain; revocation cascades to
+        every link and kills outstanding release tokens (they validate
+        against chain status at the gate).
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: {type: string}
+      responses:
+        '200': {description: Chain revoked (REVOKED).}
+        '403': {description: Only the issuing shipping line may revoke.}
+        '422': {description: Chain is not ACTIVE.}
+  /v1/secure-chains/audit/{chain_id}:
+    get:
+      operationId: getSecureChainAuditTrail
+      description: Returns the hash-chained append-only audit ledger of a release chain.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '200': {description: Audit entries in chain order.}
+        '404': {description: Not found.}
+  /v1/secure-chain/{container_id}/release-authorization:
+    get:
+      operationId: getSecureChainReleaseAuthorization
+      description: >-
+        Terminal-release check: returns 200 with a short-TTL, single-use,
+        envelope-signed (JWS EdDSA/JCS) authorization token ONLY to the
+        verified chain tail holder. eCallUp check-in / the gate must present
+        the token nonce. Wrong organisation, pending nomination, expired,
+        revoked or held chains are refused.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      responses:
+        '200': {description: Signed single-use release authorization token.}
+        '403': {description: Caller does not hold the verified chain tail.}
+        '404': {description: No ACTIVE chain for the container.}
+        '422': {description: Chain on velocity hold or nomination pending.}
+  /v1/secure-chain/consume:
+    post:
+      operationId: consumeSecureChainRelease
+      description: >-
+        Gate/eCallUp check-in redeems a release token. The nonce is consumed
+        atomically (single-use; replay is DB-rejected), the embedded JWS is
+        verified against the service signing key and the chain completes.
+        Requires the terminal-operator or gate-officer role.
+      security: [loopbackTrustedProxy: []]
+      parameters: [{$ref: '#/components/parameters/TrustedProxy'}, {$ref: '#/components/parameters/AuthenticatedPrincipal'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nonce, gate_id]
+              properties:
+                nonce: {type: string, pattern: '^[0-9a-f]{64}$'}
+                gate_id: {type: string}
+      responses:
+        '200': {description: Token consumed; chain COMPLETED.}
+        '403': {description: terminal-operator or gate-officer role required.}
+        '422': {description: Token invalid, expired or already consumed.}
   /v1/tariff-schedules:
     post:
       operationId: registerTariffSchedule

@@ -36,13 +36,17 @@ const (
 	// the financial-controls revenue contract (assessment → settlement →
 	// reconciliation chain).
 	TopicRevenueAssessments = "finance.revenue-assessments.v1"
+	// TopicSecureChain carries Secure Chain (WP-7) verified-chain container
+	// release lifecycle events.
+	TopicSecureChain = "ports.securechain.v1"
 )
 
 // validTopic reports whether the topic is a platform v1 contract topic.
 func validTopic(topic string) bool {
 	switch topic {
 	case TopicBooking, TopicGate, TopicQueue, TopicDeclarations,
-		TopicOffshore, TopicManifests, TopicCruise, TopicRevenueAssessments:
+		TopicOffshore, TopicManifests, TopicCruise, TopicRevenueAssessments,
+		TopicSecureChain:
 		return true
 	default:
 		return false

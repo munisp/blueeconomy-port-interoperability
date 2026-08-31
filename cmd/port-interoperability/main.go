@@ -25,6 +25,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/securechain"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/server"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tariff"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/telemetry"
@@ -214,9 +215,31 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("configure queue store: %w", err)
 	}
+	// Secure Chain (WP-7): verified-chain container release. Token TTL and
+	// the velocity-anomaly policy come from the environment; the fail-closed
+	// hold defaults on.
+	secureTokenMinutes, err := strconv.Atoi(defaultEnv("SECURE_CHAIN_TOKEN_TTL_MINUTES", "15"))
+	if err != nil || secureTokenMinutes < 1 {
+		return fmt.Errorf("SECURE_CHAIN_TOKEN_TTL_MINUTES must be a positive integer")
+	}
+	velocityThreshold, err := strconv.Atoi(defaultEnv("SECURE_CHAIN_VELOCITY_THRESHOLD", "5"))
+	if err != nil {
+		return fmt.Errorf("SECURE_CHAIN_VELOCITY_THRESHOLD must be an integer")
+	}
+	secureChainStore, err := securechain.NewStore(pool, envelopeSigner, securechain.Config{
+		TokenTTL:          time.Duration(secureTokenMinutes) * time.Minute,
+		VelocityThreshold: velocityThreshold,
+		VelocityHold:      defaultEnv("SECURE_CHAIN_VELOCITY_HOLD", "true") == "true",
+	})
+	if err != nil {
+		return fmt.Errorf("configure secure-chain store: %w", err)
+	}
 	// Call-up engine hook: booking slot releases promote the head of the
 	// terminal queue in the same transaction.
 	bookingStore.SetCapacityListener(queueStore)
+	// Secure Chain hook (WP-7): import-container bookings are gated on the
+	// verified chain tail inside the booking transaction.
+	bookingStore.SetReleaseVerifier(secureChainStore)
 	// Refund rail: paid bookings cancelled through the API post a
 	// compensating settlement transfer before reaching REFUNDED.
 	if err := bookingStore.SetRefundPoster(settlement, fgnShareBPS); err != nil {
@@ -240,6 +263,7 @@ func run() error {
 		Bookings:                  bookingStore,
 		Queues:                    queueStore,
 		Declarations:              declarations.NewStore(pool, envelopeSigner),
+		SecureChains:              secureChainStore,
 		Offshore:                  offshore.NewStore(pool, envelopeSigner),
 		Cruise:                    cruise.NewStore(pool, envelopeSigner),
 		Manifests:                 manifestStore,
