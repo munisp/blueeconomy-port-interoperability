@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/munisp/blueeconomy-port-interoperability/internal/telemetry"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/customs"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/ledger"
@@ -132,7 +134,14 @@ func (store *Store) capacityReleased(ctx context.Context, tx pgx.Tx, claims tena
 }
 
 func Open(ctx context.Context, databaseURL string, signer *events.Signer) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse postgres dsn: %w", err)
+	}
+	if err := telemetry.ApplyPoolEnv(poolConfig); err != nil {
+		return nil, err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
 	}

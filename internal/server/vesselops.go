@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -254,7 +255,13 @@ func (server *Server) manifestRead(response http.ResponseWriter, request *http.R
 }
 
 func (server *Server) manifestRejections(response http.ResponseWriter, request *http.Request) {
-	rejections, err := server.manifests.ListRejections(request.Context(), strings.TrimSpace(request.URL.Query().Get("manifest_id")))
+	limit := 0
+	if raw := strings.TrimSpace(request.URL.Query().Get("limit")); raw != "" {
+		if parsed, convErr := strconv.Atoi(raw); convErr == nil {
+			limit = parsed
+		}
+	}
+	rejections, err := server.manifests.ListRejectionsPage(request.Context(), strings.TrimSpace(request.URL.Query().Get("manifest_id")), limit)
 	if err != nil {
 		writeVesselOpsError(response, err)
 		return

@@ -10,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/munisp/blueeconomy-port-interoperability/internal/telemetry"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
@@ -55,7 +57,14 @@ func NewStore(pool *pgxpool.Pool, bookings *booking.Store, signer *events.Signer
 }
 
 func Open(ctx context.Context, databaseURL string, bookings *booking.Store, signer *events.Signer, graceWindow time.Duration) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse postgres dsn: %w", err)
+	}
+	if err := telemetry.ApplyPoolEnv(poolConfig); err != nil {
+		return nil, err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
 	}

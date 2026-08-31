@@ -87,10 +87,31 @@ func run() error {
 	}
 	defer pool.Close()
 
-	producer, err := kgo.NewClient(
+	// Batching knobs are opt-in via the environment; unset values keep the
+	// franz-go defaults (unchanged behavior).
+	//
+	//	PORTIO_KAFKA_LINGER_MS        producer linger        (default: franz-go default)
+	//	PORTIO_KAFKA_MAX_BATCH_BYTES  max bytes per batch    (default: franz-go default)
+	var producerOpts []kgo.Opt
+	if raw := os.Getenv("PORTIO_KAFKA_LINGER_MS"); raw != "" {
+		value, convErr := strconv.Atoi(raw)
+		if convErr != nil || value <= 0 {
+			return fmt.Errorf("PORTIO_KAFKA_LINGER_MS must be a positive integer, got %q", raw)
+		}
+		producerOpts = append(producerOpts, kgo.ProducerLinger(time.Duration(value)*time.Millisecond))
+	}
+	if raw := os.Getenv("PORTIO_KAFKA_MAX_BATCH_BYTES"); raw != "" {
+		value, convErr := strconv.Atoi(raw)
+		if convErr != nil || value <= 0 {
+			return fmt.Errorf("PORTIO_KAFKA_MAX_BATCH_BYTES must be a positive integer, got %q", raw)
+		}
+		producerOpts = append(producerOpts, kgo.ProducerBatchMaxBytes(int32(value)))
+	}
+	producerOpts = append(producerOpts,
 		kgo.SeedBrokers(brokers...),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 	)
+	producer, err := kgo.NewClient(producerOpts...)
 	if err != nil {
 		return fmt.Errorf("build kafka producer: %w", err)
 	}

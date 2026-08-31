@@ -10,12 +10,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/munisp/blueeconomy-port-interoperability/internal/telemetry"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantdb"
@@ -65,7 +68,14 @@ func NewStore(pool *pgxpool.Pool, signer *events.Signer, authorityKey ed25519.Pu
 }
 
 func Open(ctx context.Context, databaseURL string, signer *events.Signer, authorityKey ed25519.PublicKey, kidPrefix string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse postgres dsn: %w", err)
+	}
+	if err := telemetry.ApplyPoolEnv(poolConfig); err != nil {
+		return nil, err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
 	}
@@ -374,10 +384,26 @@ func (store *Store) quarantineEnvelope(ctx context.Context, eventID *uuid.UUID, 
 	return cause
 }
 
+const (
+	listRejectionsDefaultCap = 500
+	listRejectionsMaxCap     = 5000
+)
+
 // ListRejections returns the rejection queue, newest first. A manifestID of
 // "" lists envelope-level quarantine entries and all manifest rejections
 // for the tenant.
 func (store *Store) ListRejections(ctx context.Context, manifestID string) ([]Rejection, error) {
+	return store.ListRejectionsPage(ctx, manifestID, 0)
+}
+
+// ListRejectionsPage is ListRejections with a row cap; limit <= 0 applies
+// listRejectionsDefaultCap. The cap is fail-closed like the declarations
+// list: an explicit limit outside [1, listRejectionsMaxCap] falls back to
+// the default rather than erroring or going unbounded.
+func (store *Store) ListRejectionsPage(ctx context.Context, manifestID string, limit int) ([]Rejection, error) {
+	if limit < 1 || limit > listRejectionsMaxCap {
+		limit = listRejectionsDefaultCap
+	}
 	var rejections []Rejection
 	err := tenantdb.WithTx(ctx, store.pool, func(tx pgx.Tx, _ tenantctx.Claims) error {
 		query := `
@@ -392,7 +418,7 @@ func (store *Store) ListRejections(ctx context.Context, manifestID string) ([]Re
 			query += ` WHERE manifest_id = $1`
 			args = append(args, parsed)
 		}
-		query += ` ORDER BY rejection_seq`
+		query += ` ORDER BY rejection_seq LIMIT ` + strconv.Itoa(limit)
 		rows, err := tx.Query(ctx, query, args...)
 		if err != nil {
 			return fmt.Errorf("list manifest rejections: %w", err)
