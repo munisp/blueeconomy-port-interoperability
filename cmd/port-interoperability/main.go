@@ -24,6 +24,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/offshore"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/pushtokens"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/securechain"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/server"
@@ -258,6 +259,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("configure manifest store: %w", err)
 	}
+	pushTokenStore, err := pushtokens.NewStore(pool)
+	if err != nil {
+		return fmt.Errorf("configure push-token store: %w", err)
+	}
 	handler, err := server.New(server.Config{
 		Store:                     portcall.NewStore(pool),
 		Bookings:                  bookingStore,
@@ -268,6 +273,7 @@ func run() error {
 		Cruise:                    cruise.NewStore(pool, envelopeSigner),
 		Manifests:                 manifestStore,
 		Tariffs:                   tariff.NewStore(pool, envelopeSigner),
+		PushTokens:                pushTokenStore,
 		DeclarationScorer:         declarationScorer,
 		DeclarationHighValueMinor: highValueMinor,
 		Payments:                  paymentsGateway,

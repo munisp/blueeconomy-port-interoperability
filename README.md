@@ -148,6 +148,18 @@ eCallUp 2.0 truck call-up queue (new):
   the same transactional `platform_outbox` (classification `INTERNAL`,
   provenance principal + JWS provenance signature).
 
+Mobile push tokens (migration 0020):
+
+- `POST /v1/push-tokens` registers or refreshes the caller's device push
+  token (`{deviceId, token, platform}`; platform `android|ios|web`), scoped
+  by (tenant, verified user subject, device) — the user id is always the
+  verified gateway subject, never the request body. A provider token moving
+  between devices/users revokes the previous ACTIVE holder atomically.
+- `POST /v1/push-tokens/revoke` marks the caller's device registration
+  REVOKED (logout / token rollover); unknown or already-revoked devices
+  fail closed with 404. No maker-checker (self-service device plumbing) and
+  no platform event surface. Contract: `openapi.yaml`.
+
 Nigeria Customs cross-validation (new, migration 0011):
 
 - A booking may bind a cargo declaration (`cargo_declaration_ref`,

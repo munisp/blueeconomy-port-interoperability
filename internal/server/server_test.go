@@ -20,6 +20,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/offshore"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/pushtokens"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/securechain"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tariff"
@@ -110,6 +111,21 @@ func (fakeScorer) Score(context.Context, declarations.ScoreRequest) (declaration
 	return declarations.ScoreResponse{Score: 10, ModelVersion: "test-scorer-1"}, nil
 }
 
+type fakePushTokens struct {
+	revokeErr error
+}
+
+func (fake fakePushTokens) Register(_ context.Context, request pushtokens.RegisterRequest) (pushtokens.Token, error) {
+	return pushtokens.Token{UserID: "integration-tester", DeviceID: request.DeviceID, Token: request.Token, Platform: request.Platform, Status: "ACTIVE"}, nil
+}
+
+func (fake fakePushTokens) Revoke(_ context.Context, deviceID string) (pushtokens.Token, error) {
+	if fake.revokeErr != nil {
+		return pushtokens.Token{}, fake.revokeErr
+	}
+	return pushtokens.Token{UserID: "integration-tester", DeviceID: deviceID, Status: "REVOKED"}, nil
+}
+
 func testConfig() Config {
 	return Config{
 		Store:             portcall.NewStore(nil),
@@ -121,6 +137,7 @@ func testConfig() Config {
 		Manifests:         mustManifestStore(),
 		SecureChains:      mustSecureChainStore(),
 		Tariffs:           tariff.NewStore(nil, mustSigner()),
+		PushTokens:        fakePushTokens{},
 		DeclarationScorer: fakeScorer{},
 		Payments:          fakePayments{},
 		Orchestrator:      fakeOrchestrator{},
