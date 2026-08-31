@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
 
 type Store struct {
@@ -37,6 +38,12 @@ func (store *Store) Close() {
 	store.pool.Close()
 }
 
+// Pool exposes the underlying pool for infrastructure adapters (replay stores,
+// outbox publishers) that are not tenant-scoped business operations.
+func (store *Store) Pool() *pgxpool.Pool {
+	return store.pool
+}
+
 func (store *Store) Exec(ctx context.Context, statement string) (int64, error) {
 	result, err := store.pool.Exec(ctx, statement)
 	if err != nil {
@@ -52,28 +59,35 @@ func (store *Store) Create(ctx context.Context, idempotencyKey string, request C
 	if err := request.Validate(); err != nil {
 		return PortCall{}, err
 	}
-	tx, err := store.pool.Begin(ctx)
-	if err != nil {
-		return PortCall{}, fmt.Errorf("begin create: %w", err)
-	}
-	defer tx.Rollback(ctx)
+	var call PortCall
+	err := store.WithTenantTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
+		created, err := store.createTx(ctx, tx, claims, idempotencyKey, request)
+		if err != nil {
+			return err
+		}
+		call = created
+		return nil
+	})
+	return call, err
+}
 
+func (store *Store) createTx(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, idempotencyKey string, request CreateRequest) (PortCall, error) {
 	if err := ensureActiveAgencyProfile(ctx, tx, request.AgencyProfileID, request.AgencyProfileVersion); err != nil {
 		return PortCall{}, err
 	}
 	createdAt := time.Now().UTC()
 	var call PortCall
 	inserted := false
-	err = tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		INSERT INTO port_calls (
 			call_id, vessel_imo, port_code, declaration_reference, submitted_by, agency_profile_id, agency_profile_version,
-			status, idempotency_key, created_at, updated_at, version
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, 1)
+			status, idempotency_key, created_at, updated_at, version, tenant_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, 1, $11)
 		ON CONFLICT (idempotency_key) DO NOTHING
 		RETURNING call_id, vessel_imo, port_code, declaration_reference, submitted_by,
 			agency_profile_id, agency_profile_version, status, created_at, updated_at, version`,
 		request.CallID, request.VesselIMO, request.PortCode, request.DeclarationRef,
-		request.SubmittedBy, request.AgencyProfileID, request.AgencyProfileVersion, StatusDraft, idempotencyKey, createdAt,
+		request.SubmittedBy, request.AgencyProfileID, request.AgencyProfileVersion, StatusDraft, idempotencyKey, createdAt, claims.TenantID,
 	).Scan(&call.CallID, &call.VesselIMO, &call.PortCode, &call.DeclarationRef, &call.SubmittedBy, &call.AgencyProfileID, &call.AgencyProfileVersion,
 		&call.Status, &call.CreatedAt, &call.UpdatedAt, &call.Version)
 	if err == nil {
@@ -97,9 +111,6 @@ func (store *Store) Create(ctx context.Context, idempotencyKey string, request C
 		if !call.Matches(request) {
 			return PortCall{}, ErrIdempotencyConflict
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return PortCall{}, fmt.Errorf("commit idempotent replay: %w", err)
-		}
 		return call, nil
 	}
 
@@ -108,19 +119,79 @@ func (store *Store) Create(ctx context.Context, idempotencyKey string, request C
 		return PortCall{}, fmt.Errorf("encode created event: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO port_call_outbox (event_id, call_id, event_type, payload, created_at)
-		VALUES ($1, $2, 'port_call.created', $3, $4)`, uuid.New(), call.CallID, payload, createdAt); err != nil {
+		INSERT INTO port_call_outbox (event_id, call_id, event_type, payload, created_at, tenant_id)
+		VALUES ($1, $2, 'port_call.created', $3, $4, $5)`, uuid.New(), call.CallID, payload, createdAt, claims.TenantID); err != nil {
 		return PortCall{}, fmt.Errorf("write created event: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return PortCall{}, fmt.Errorf("commit create: %w", err)
 	}
 	return call, nil
 }
 
 func (store *Store) Get(ctx context.Context, callID string) (PortCall, error) {
 	var call PortCall
-	err := store.pool.QueryRow(ctx, `
+	err := store.WithTenantTx(ctx, func(tx pgx.Tx, _ tenantctx.Claims) error {
+		err := tx.QueryRow(ctx, `
+			SELECT call_id, vessel_imo, port_code, declaration_reference, submitted_by,
+				agency_profile_id, agency_profile_version, status, created_at, updated_at, version
+			FROM port_calls WHERE call_id = $1`, callID).
+			Scan(&call.CallID, &call.VesselIMO, &call.PortCode, &call.DeclarationRef, &call.SubmittedBy, &call.AgencyProfileID, &call.AgencyProfileVersion,
+				&call.Status, &call.CreatedAt, &call.UpdatedAt, &call.Version)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("get port call: %w", err)
+		}
+		return nil
+	})
+	return call, err
+}
+
+func (store *Store) Transition(ctx context.Context, callID string, expectedVersion int64, next Status) (PortCall, error) {
+	var updated PortCall
+	err := store.WithTenantTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
+		current, err := store.getTx(ctx, tx, callID)
+		if err != nil {
+			return err
+		}
+		if current.Version != expectedVersion {
+			return ErrOptimisticConflict
+		}
+		if !ValidTransition(current.Status, next) {
+			return ErrInvalidTransition
+		}
+		updatedAt := time.Now().UTC()
+		err = tx.QueryRow(ctx, `
+			UPDATE port_calls
+			SET status = $1, updated_at = $2, version = version + 1
+			WHERE call_id = $3 AND status = $4 AND version = $5
+			RETURNING call_id, vessel_imo, port_code, declaration_reference, submitted_by,
+				status, created_at, updated_at, version`,
+			next, updatedAt, callID, current.Status, expectedVersion).
+			Scan(&updated.CallID, &updated.VesselIMO, &updated.PortCode, &updated.DeclarationRef,
+				&updated.SubmittedBy, &updated.Status, &updated.CreatedAt, &updated.UpdatedAt, &updated.Version)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrOptimisticConflict
+		}
+		if err != nil {
+			return fmt.Errorf("transition port call: %w", err)
+		}
+		payload, err := json.Marshal(updated)
+		if err != nil {
+			return fmt.Errorf("encode status event: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO port_call_outbox (event_id, call_id, event_type, payload, created_at, tenant_id)
+			VALUES ($1, $2, 'port_call.status_changed', $3, $4, $5)`, uuid.New(), updated.CallID, payload, updatedAt, claims.TenantID); err != nil {
+			return fmt.Errorf("write status event: %w", err)
+		}
+		return nil
+	})
+	return updated, err
+}
+
+func (store *Store) getTx(ctx context.Context, tx pgx.Tx, callID string) (PortCall, error) {
+	var call PortCall
+	err := tx.QueryRow(ctx, `
 		SELECT call_id, vessel_imo, port_code, declaration_reference, submitted_by,
 			agency_profile_id, agency_profile_version, status, created_at, updated_at, version
 		FROM port_calls WHERE call_id = $1`, callID).
@@ -133,54 +204,6 @@ func (store *Store) Get(ctx context.Context, callID string) (PortCall, error) {
 		return PortCall{}, fmt.Errorf("get port call: %w", err)
 	}
 	return call, nil
-}
-
-func (store *Store) Transition(ctx context.Context, callID string, expectedVersion int64, next Status) (PortCall, error) {
-	current, err := store.Get(ctx, callID)
-	if err != nil {
-		return PortCall{}, err
-	}
-	if current.Version != expectedVersion || !ValidTransition(current.Status, next) {
-		if current.Version != expectedVersion {
-			return PortCall{}, ErrOptimisticConflict
-		}
-		return PortCall{}, ErrInvalidTransition
-	}
-	tx, err := store.pool.Begin(ctx)
-	if err != nil {
-		return PortCall{}, fmt.Errorf("begin transition: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	updatedAt := time.Now().UTC()
-	var updated PortCall
-	err = tx.QueryRow(ctx, `
-		UPDATE port_calls
-		SET status = $1, updated_at = $2, version = version + 1
-		WHERE call_id = $3 AND status = $4 AND version = $5
-		RETURNING call_id, vessel_imo, port_code, declaration_reference, submitted_by,
-			status, created_at, updated_at, version`,
-		next, updatedAt, callID, current.Status, expectedVersion).
-		Scan(&updated.CallID, &updated.VesselIMO, &updated.PortCode, &updated.DeclarationRef,
-			&updated.SubmittedBy, &updated.Status, &updated.CreatedAt, &updated.UpdatedAt, &updated.Version)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return PortCall{}, ErrOptimisticConflict
-	}
-	if err != nil {
-		return PortCall{}, fmt.Errorf("transition port call: %w", err)
-	}
-	payload, err := json.Marshal(updated)
-	if err != nil {
-		return PortCall{}, fmt.Errorf("encode status event: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO port_call_outbox (event_id, call_id, event_type, payload, created_at)
-		VALUES ($1, $2, 'port_call.status_changed', $3, $4)`, uuid.New(), updated.CallID, payload, updatedAt); err != nil {
-		return PortCall{}, fmt.Errorf("write status event: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return PortCall{}, fmt.Errorf("commit transition: %w", err)
-	}
-	return updated, nil
 }
 
 type Clearance struct {
@@ -200,11 +223,19 @@ func (store *Store) DeclareDocument(ctx context.Context, callID string, request 
 	if err := request.Validate(); err != nil {
 		return DocumentDeclaration{}, err
 	}
-	tx, err := store.pool.Begin(ctx)
-	if err != nil {
-		return DocumentDeclaration{}, fmt.Errorf("begin document declaration: %w", err)
-	}
-	defer tx.Rollback(ctx)
+	var document DocumentDeclaration
+	err := store.WithTenantTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
+		declared, err := store.declareDocumentTx(ctx, tx, claims, callID, request)
+		if err != nil {
+			return err
+		}
+		document = declared
+		return nil
+	})
+	return document, err
+}
+
+func (store *Store) declareDocumentTx(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, callID string, request DocumentDeclarationRequest) (DocumentDeclaration, error) {
 	var currentStatus Status
 	if err := tx.QueryRow(ctx, `SELECT status FROM port_calls WHERE call_id = $1 FOR UPDATE`, callID).Scan(&currentStatus); errors.Is(err, pgx.ErrNoRows) {
 		return DocumentDeclaration{}, ErrNotFound
@@ -217,24 +248,21 @@ func (store *Store) DeclareDocument(ctx context.Context, callID string, request 
 	createdAt := time.Now().UTC()
 	id := uuid.New()
 	var document DocumentDeclaration
-	err = tx.QueryRow(ctx, `
-		INSERT INTO port_call_documents (document_id, call_id, document_type, media_type, size_bytes, sha256, declared_by, status, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
+	err := tx.QueryRow(ctx, `
+		INSERT INTO port_call_documents (document_id, call_id, document_type, media_type, size_bytes, sha256, declared_by, status, created_at, updated_at, tenant_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10)
 		ON CONFLICT (call_id, document_type, sha256) DO NOTHING
-		RETURNING document_id, call_id, document_type, media_type, size_bytes, sha256, declared_by, status, created_at, updated_at`,
-		id, callID, request.DocumentType, request.MediaType, request.SizeBytes, request.SHA256, request.DeclaredBy, DocumentDeclared, createdAt,
-	).Scan(&document.DocumentID, &document.CallID, &document.DocumentType, &document.MediaType, &document.SizeBytes, &document.SHA256, &document.DeclaredBy, &document.Status, &document.CreatedAt, &document.UpdatedAt)
+		RETURNING document_id, call_id, document_type, media_type, size_bytes, sha256, declared_by, status, created_at, updated_at, version`,
+		id, callID, request.DocumentType, request.MediaType, request.SizeBytes, request.SHA256, request.DeclaredBy, DocumentDeclared, createdAt, claims.TenantID,
+	).Scan(&document.DocumentID, &document.CallID, &document.DocumentType, &document.MediaType, &document.SizeBytes, &document.SHA256, &document.DeclaredBy, &document.Status, &document.CreatedAt, &document.UpdatedAt, &document.Version)
 	if errors.Is(err, pgx.ErrNoRows) {
-		err = tx.QueryRow(ctx, `SELECT document_id, call_id, document_type, media_type, size_bytes, sha256, declared_by, status, created_at, updated_at FROM port_call_documents WHERE call_id=$1 AND document_type=$2 AND sha256=$3 FOR UPDATE`, callID, request.DocumentType, request.SHA256).
-			Scan(&document.DocumentID, &document.CallID, &document.DocumentType, &document.MediaType, &document.SizeBytes, &document.SHA256, &document.DeclaredBy, &document.Status, &document.CreatedAt, &document.UpdatedAt)
+		err = tx.QueryRow(ctx, `SELECT document_id, call_id, document_type, media_type, size_bytes, sha256, declared_by, status, created_at, updated_at, version FROM port_call_documents WHERE call_id=$1 AND document_type=$2 AND sha256=$3 FOR UPDATE`, callID, request.DocumentType, request.SHA256).
+			Scan(&document.DocumentID, &document.CallID, &document.DocumentType, &document.MediaType, &document.SizeBytes, &document.SHA256, &document.DeclaredBy, &document.Status, &document.CreatedAt, &document.UpdatedAt, &document.Version)
 		if err != nil {
 			return DocumentDeclaration{}, fmt.Errorf("lookup document replay: %w", err)
 		}
 		if document.MediaType != request.MediaType || document.SizeBytes != request.SizeBytes || document.DeclaredBy != request.DeclaredBy {
 			return DocumentDeclaration{}, ErrDocumentConflict
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return DocumentDeclaration{}, fmt.Errorf("commit document replay: %w", err)
 		}
 		return document, nil
 	}
@@ -245,11 +273,8 @@ func (store *Store) DeclareDocument(ctx context.Context, callID string, request 
 	if err != nil {
 		return DocumentDeclaration{}, fmt.Errorf("encode document event: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO port_call_outbox (event_id, call_id, event_type, payload, created_at) VALUES ($1,$2,'port_call.document_declared',$3,$4)`, uuid.New(), callID, payload, createdAt); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO port_call_outbox (event_id, call_id, event_type, payload, created_at, tenant_id) VALUES ($1,$2,'port_call.document_declared',$3,$4,$5)`, uuid.New(), callID, payload, createdAt, claims.TenantID); err != nil {
 		return DocumentDeclaration{}, fmt.Errorf("write document event: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return DocumentDeclaration{}, fmt.Errorf("commit document declaration: %w", err)
 	}
 	return document, nil
 }
@@ -258,11 +283,19 @@ func (store *Store) DecideClearance(ctx context.Context, callID string, expected
 	if callID == "" || expectedVersion < 1 || (decision != ClearanceApproved && decision != ClearanceRejected) || reason == "" || reason != strings.TrimSpace(reason) || len(reason) > 1024 || decidedBy == "" || decidedBy != strings.TrimSpace(decidedBy) {
 		return Clearance{}, ErrClearanceInvalid
 	}
-	tx, err := store.pool.Begin(ctx)
-	if err != nil {
-		return Clearance{}, fmt.Errorf("begin clearance: %w", err)
-	}
-	defer tx.Rollback(ctx)
+	var clearance Clearance
+	err := store.WithTenantTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
+		decided, err := store.decideClearanceTx(ctx, tx, claims, callID, expectedVersion, decision, reason, decidedBy)
+		if err != nil {
+			return err
+		}
+		clearance = decided
+		return nil
+	})
+	return clearance, err
+}
+
+func (store *Store) decideClearanceTx(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, callID string, expectedVersion int64, decision ClearanceDecision, reason, decidedBy string) (Clearance, error) {
 	var status Status
 	var currentVersion int64
 	var agencyProfileID, agencyProfileVersion string
@@ -306,11 +339,11 @@ func (store *Store) DecideClearance(ctx context.Context, callID string, expected
 	}
 	decidedAt := time.Now().UTC()
 	var clearance Clearance
-	err = tx.QueryRow(ctx, `
-		INSERT INTO port_call_clearance_decisions (decision_id, call_id, decision, reason, decided_by, call_version, decided_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
+	err := tx.QueryRow(ctx, `
+		INSERT INTO port_call_clearance_decisions (decision_id, call_id, decision, reason, decided_by, call_version, decided_at, tenant_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 		ON CONFLICT (call_id) DO NOTHING
-		RETURNING decision_id, call_id, decision, reason, decided_by, call_version, decided_at`, uuid.New(), callID, decision, reason, decidedBy, expectedVersion+1, decidedAt).
+		RETURNING decision_id, call_id, decision, reason, decided_by, call_version, decided_at`, uuid.New(), callID, decision, reason, decidedBy, expectedVersion+1, decidedAt, claims.TenantID).
 		Scan(&clearance.DecisionID, &clearance.CallID, &clearance.Decision, &clearance.Reason, &clearance.DecidedBy, &clearance.CallVersion, &clearance.DecidedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Clearance{}, ErrClearanceConflict
@@ -325,11 +358,8 @@ func (store *Store) DecideClearance(ctx context.Context, callID string, expected
 	if err != nil {
 		return Clearance{}, fmt.Errorf("encode clearance event: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO port_call_outbox (event_id, call_id, event_type, payload, created_at) VALUES ($1,$2,'port_call.clearance_decided',$3,$4)`, uuid.New(), callID, payload, decidedAt); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO port_call_outbox (event_id, call_id, event_type, payload, created_at, tenant_id) VALUES ($1,$2,'port_call.clearance_decided',$3,$4,$5)`, uuid.New(), callID, payload, decidedAt, claims.TenantID); err != nil {
 		return Clearance{}, fmt.Errorf("write clearance event: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return Clearance{}, fmt.Errorf("commit clearance: %w", err)
 	}
 	return clearance, nil
 }
@@ -342,16 +372,24 @@ func (store *Store) ReviewDocument(ctx context.Context, callID, documentID strin
 	if err != nil {
 		return DocumentDeclaration{}, ErrDocumentConflict
 	}
-	tx, err := store.pool.Begin(ctx)
-	if err != nil {
-		return DocumentDeclaration{}, fmt.Errorf("begin document review: %w", err)
-	}
-	defer tx.Rollback(ctx)
+	var document DocumentDeclaration
+	err = store.WithTenantTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
+		reviewed, err := store.reviewDocumentTx(ctx, tx, claims, callID, docID, request)
+		if err != nil {
+			return err
+		}
+		document = reviewed
+		return nil
+	})
+	return document, err
+}
+
+func (store *Store) reviewDocumentTx(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, callID string, docID uuid.UUID, request DocumentReviewRequest) (DocumentDeclaration, error) {
 	var document DocumentDeclaration
 	var reviewedBy, reviewedReason *string
 	var reviewedAt *time.Time
 	var currentStatus DocumentStatus
-	err = tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		UPDATE port_call_documents
 		SET status=$1, version=version+1, reviewed_by=$2, reviewed_reason=$3, reviewed_at=$4, updated_at=$4
 		WHERE document_id=$5 AND call_id=$6 AND status='DECLARED' AND version=$7
@@ -379,11 +417,8 @@ func (store *Store) ReviewDocument(ctx context.Context, callID, documentID strin
 	if err != nil {
 		return DocumentDeclaration{}, fmt.Errorf("encode document review event: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO port_call_outbox (event_id, call_id, event_type, payload, created_at) VALUES ($1,$2,'port_call.document_reviewed',$3,$4)`, uuid.New(), callID, payload, document.UpdatedAt); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO port_call_outbox (event_id, call_id, event_type, payload, created_at, tenant_id) VALUES ($1,$2,'port_call.document_reviewed',$3,$4,$5)`, uuid.New(), callID, payload, document.UpdatedAt, claims.TenantID); err != nil {
 		return DocumentDeclaration{}, fmt.Errorf("write document review event: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return DocumentDeclaration{}, fmt.Errorf("commit document review: %w", err)
 	}
 	return document, nil
 }
@@ -392,43 +427,48 @@ func (store *Store) SupersedeDocument(ctx context.Context, callID string, reques
 	if !validateWorkflowText(request.OriginalDocumentID, 64) || !validateWorkflowText(request.ReplacementDocumentID, 64) || request.OriginalDocumentID == request.ReplacementDocumentID || !validateWorkflowText(request.Reason, 1024) || !validateWorkflowText(request.SupersededBy, 256) {
 		return ErrDocumentConflict
 	}
-	tx, err := store.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	var originalType, replacementType string
-	var originalStatus, replacementStatus DocumentStatus
-	if err := tx.QueryRow(ctx, `SELECT document_type,status FROM port_call_documents WHERE document_id=$1 AND call_id=$2 FOR UPDATE`, request.OriginalDocumentID, callID).Scan(&originalType, &originalStatus); err != nil {
-		return ErrNotFound
-	}
-	if err := tx.QueryRow(ctx, `SELECT document_type,status FROM port_call_documents WHERE document_id=$1 AND call_id=$2 FOR UPDATE`, request.ReplacementDocumentID, callID).Scan(&replacementType, &replacementStatus); err != nil {
-		return ErrNotFound
-	}
-	if originalType != replacementType || originalStatus != DocumentVerified || replacementStatus != DocumentVerified {
-		return ErrDocumentConflict
-	}
-	now := time.Now().UTC()
-	id := uuid.New()
-	if _, err := tx.Exec(ctx, `INSERT INTO port_call_document_supersessions (supersession_id,call_id,original_document_id,replacement_document_id,reason,superseded_by,superseded_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`, id, callID, request.OriginalDocumentID, request.ReplacementDocumentID, request.Reason, request.SupersededBy, now); err != nil {
-		return ErrDocumentConflict
-	}
-	payload, _ := json.Marshal(request)
-	if _, err := tx.Exec(ctx, `INSERT INTO port_call_outbox (event_id,call_id,event_type,payload,created_at) VALUES ($1,$2,'port_call.document_superseded',$3,$4)`, uuid.New(), callID, payload, now); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return store.WithTenantTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
+		var originalType, replacementType string
+		var originalStatus, replacementStatus DocumentStatus
+		if err := tx.QueryRow(ctx, `SELECT document_type,status FROM port_call_documents WHERE document_id=$1 AND call_id=$2 FOR UPDATE`, request.OriginalDocumentID, callID).Scan(&originalType, &originalStatus); err != nil {
+			return ErrNotFound
+		}
+		if err := tx.QueryRow(ctx, `SELECT document_type,status FROM port_call_documents WHERE document_id=$1 AND call_id=$2 FOR UPDATE`, request.ReplacementDocumentID, callID).Scan(&replacementType, &replacementStatus); err != nil {
+			return ErrNotFound
+		}
+		if originalType != replacementType || originalStatus != DocumentVerified || replacementStatus != DocumentVerified {
+			return ErrDocumentConflict
+		}
+		now := time.Now().UTC()
+		id := uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO port_call_document_supersessions (supersession_id,call_id,original_document_id,replacement_document_id,reason,superseded_by,superseded_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`, id, callID, request.OriginalDocumentID, request.ReplacementDocumentID, request.Reason, request.SupersededBy, now); err != nil {
+			return ErrDocumentConflict
+		}
+		payload, _ := json.Marshal(request)
+		if _, err := tx.Exec(ctx, `INSERT INTO port_call_outbox (event_id,call_id,event_type,payload,created_at,tenant_id) VALUES ($1,$2,'port_call.document_superseded',$3,$4,$5)`, uuid.New(), callID, payload, now, claims.TenantID); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func (store *Store) AmendClearance(ctx context.Context, callID string, request ClearanceAmendmentRequest) (Clearance, error) {
 	if request.ExpectedVersion < 1 || (request.Decision != ClearanceApproved && request.Decision != ClearanceRejected) || !validateWorkflowText(request.Reason, 1024) || !validateWorkflowText(request.AmendedBy, 256) {
 		return Clearance{}, ErrClearanceInvalid
 	}
-	tx, err := store.pool.Begin(ctx)
-	if err != nil {
-		return Clearance{}, err
-	}
-	defer tx.Rollback(ctx)
+	var amended Clearance
+	err := store.WithTenantTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
+		result, err := store.amendClearanceTx(ctx, tx, claims, callID, request)
+		if err != nil {
+			return err
+		}
+		amended = result
+		return nil
+	})
+	return amended, err
+}
+
+func (store *Store) amendClearanceTx(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims, callID string, request ClearanceAmendmentRequest) (Clearance, error) {
 	var callVersion int64
 	if err := tx.QueryRow(ctx, `SELECT version FROM port_calls WHERE call_id=$1 FOR UPDATE`, callID).Scan(&callVersion); err != nil {
 		return Clearance{}, ErrNotFound
@@ -444,23 +484,36 @@ func (store *Store) AmendClearance(ctx context.Context, callID string, request C
 		return Clearance{}, ErrClearanceConflict
 	}
 	now := time.Now().UTC()
+	// The amendment advances the port call in the same transaction: the
+	// optimistic-concurrency version is bumped and the port-call status is
+	// aligned with the latest decision (APPROVED keeps ACCEPTED, REJECTED
+	// moves the call to REJECTED).
+	newVersion := callVersion + 1
+	callStatus := StatusAccepted
+	if request.Decision == ClearanceRejected {
+		callStatus = StatusRejected
+	}
 	amended := prior
 	amended.Decision = request.Decision
 	amended.Reason = request.Reason
 	amended.DecidedBy = request.AmendedBy
-	amended.CallVersion = callVersion
+	amended.CallVersion = newVersion
 	amended.DecidedAt = now
 	if _, err := tx.Exec(ctx, `UPDATE port_call_clearance_decisions SET decision=$1,reason=$2,decided_by=$3,call_version=$4,decided_at=$5 WHERE decision_id=$6`, amended.Decision, amended.Reason, amended.DecidedBy, amended.CallVersion, amended.DecidedAt, prior.DecisionID); err != nil {
 		return Clearance{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO port_call_clearance_amendments (amendment_id,call_id,prior_decision_id,prior_decision,amended_decision,reason,amended_by,call_version,amended_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, uuid.New(), callID, prior.DecisionID, prior.Decision, amended.Decision, amended.Reason, amended.DecidedBy, callVersion, now); err != nil {
+	updated, err := tx.Exec(ctx, `UPDATE port_calls SET version=$1, status=$2, updated_at=$3 WHERE call_id=$4 AND version=$5`, newVersion, string(callStatus), now, callID, callVersion)
+	if err != nil {
+		return Clearance{}, fmt.Errorf("advance port call for amendment: %w", err)
+	}
+	if updated.RowsAffected() != 1 {
+		return Clearance{}, ErrOptimisticConflict
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO port_call_clearance_amendments (amendment_id,call_id,prior_decision_id,prior_decision,amended_decision,reason,amended_by,call_version,amended_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, uuid.New(), callID, prior.DecisionID, prior.Decision, amended.Decision, amended.Reason, amended.DecidedBy, newVersion, now); err != nil {
 		return Clearance{}, err
 	}
 	payload, _ := json.Marshal(amended)
-	if _, err := tx.Exec(ctx, `INSERT INTO port_call_outbox (event_id,call_id,event_type,payload,created_at) VALUES ($1,$2,'port_call.clearance_amended',$3,$4)`, uuid.New(), callID, payload, now); err != nil {
-		return Clearance{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO port_call_outbox (event_id,call_id,event_type,payload,created_at,tenant_id) VALUES ($1,$2,'port_call.clearance_amended',$3,$4,$5)`, uuid.New(), callID, payload, now, claims.TenantID); err != nil {
 		return Clearance{}, err
 	}
 	return amended, nil
@@ -485,40 +538,34 @@ func (store *Store) RegisterAgencyProfile(ctx context.Context, profile AgencyPro
 		!strings.HasPrefix(profile.ProfileSHA256, "sha256:") {
 		return errors.New("agency profile registration is invalid")
 	}
-	tx, err := store.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin agency profile registration: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	now := time.Now().UTC()
-	inserted, err := tx.Exec(ctx, `INSERT INTO port_agency_profile_versions (profile_id,version,agency_code,active,profile_sha256,registered_by,registered_at) VALUES ($1,$2,$3,true,$4,$5,$6) ON CONFLICT (profile_id,version) DO NOTHING`, profile.ProfileID, profile.Version, profile.AgencyCode, profile.ProfileSHA256, profile.RegisteredBy, now)
-	if err != nil {
-		return fmt.Errorf("insert immutable agency profile version: %w", err)
-	}
-	if inserted.RowsAffected() == 0 {
-		var agencyCode, digest string
-		if err := tx.QueryRow(ctx, `SELECT agency_code, profile_sha256 FROM port_agency_profile_versions WHERE profile_id=$1 AND version=$2 FOR SHARE`, profile.ProfileID, profile.Version).Scan(&agencyCode, &digest); err != nil {
-			return fmt.Errorf("load immutable agency profile version: %w", err)
+	return store.WithTenantTx(ctx, func(tx pgx.Tx, claims tenantctx.Claims) error {
+		now := time.Now().UTC()
+		inserted, err := tx.Exec(ctx, `INSERT INTO port_agency_profile_versions (profile_id,version,agency_code,active,profile_sha256,registered_by,registered_at,tenant_id) VALUES ($1,$2,$3,true,$4,$5,$6,$7) ON CONFLICT (profile_id,version) DO NOTHING`, profile.ProfileID, profile.Version, profile.AgencyCode, profile.ProfileSHA256, profile.RegisteredBy, now, claims.TenantID)
+		if err != nil {
+			return fmt.Errorf("insert immutable agency profile version: %w", err)
 		}
-		if agencyCode != profile.AgencyCode || digest != profile.ProfileSHA256 {
-			return errors.New("agency profile version is immutable; create a new version")
+		if inserted.RowsAffected() == 0 {
+			var agencyCode, digest string
+			if err := tx.QueryRow(ctx, `SELECT agency_code, profile_sha256 FROM port_agency_profile_versions WHERE profile_id=$1 AND version=$2 FOR SHARE`, profile.ProfileID, profile.Version).Scan(&agencyCode, &digest); err != nil {
+				return fmt.Errorf("load immutable agency profile version: %w", err)
+			}
+			if agencyCode != profile.AgencyCode || digest != profile.ProfileSHA256 {
+				return errors.New("agency profile version is immutable; create a new version")
+			}
+		} else if _, err := tx.Exec(ctx, `INSERT INTO port_agency_profile_events (profile_id,version,event_type,active,profile_sha256,actor,occurred_at,reason,tenant_id) VALUES ($1,$2,'REGISTERED',true,$3,$4,$5,'profile version registered',$6)`, profile.ProfileID, profile.Version, profile.ProfileSHA256, profile.RegisteredBy, now, claims.TenantID); err != nil {
+			return fmt.Errorf("append agency profile registration event: %w", err)
 		}
-	} else if _, err := tx.Exec(ctx, `INSERT INTO port_agency_profile_events (profile_id,version,event_type,active,profile_sha256,actor,occurred_at,reason) VALUES ($1,$2,'REGISTERED',true,$3,$4,$5,'profile version registered')`, profile.ProfileID, profile.Version, profile.ProfileSHA256, profile.RegisteredBy, now); err != nil {
-		return fmt.Errorf("append agency profile registration event: %w", err)
-	}
-	if !profile.Active {
-		if _, err := tx.Exec(ctx, `INSERT INTO port_agency_profile_events (profile_id,version,event_type,active,profile_sha256,actor,occurred_at,reason) VALUES ($1,$2,'DEACTIVATED',false,$3,$4,$5,'profile deactivated')`, profile.ProfileID, profile.Version, profile.ProfileSHA256, profile.RegisteredBy, now); err != nil {
-			return fmt.Errorf("append agency profile deactivation event: %w", err)
+		if !profile.Active {
+			if _, err := tx.Exec(ctx, `INSERT INTO port_agency_profile_events (profile_id,version,event_type,active,profile_sha256,actor,occurred_at,reason,tenant_id) VALUES ($1,$2,'DEACTIVATED',false,$3,$4,$5,'profile deactivated',$6)`, profile.ProfileID, profile.Version, profile.ProfileSHA256, profile.RegisteredBy, now, claims.TenantID); err != nil {
+				return fmt.Errorf("append agency profile deactivation event: %w", err)
+			}
+		} else if inserted.RowsAffected() == 0 {
+			if _, err := tx.Exec(ctx, `INSERT INTO port_agency_profile_events (profile_id,version,event_type,active,profile_sha256,actor,occurred_at,reason,tenant_id) VALUES ($1,$2,'ACTIVATED',true,$3,$4,$5,'profile activated',$6)`, profile.ProfileID, profile.Version, profile.ProfileSHA256, profile.RegisteredBy, now, claims.TenantID); err != nil {
+				return fmt.Errorf("append agency profile activation event: %w", err)
+			}
 		}
-	} else if inserted.RowsAffected() == 0 {
-		if _, err := tx.Exec(ctx, `INSERT INTO port_agency_profile_events (profile_id,version,event_type,active,profile_sha256,actor,occurred_at,reason) VALUES ($1,$2,'ACTIVATED',true,$3,$4,$5,'profile activated')`, profile.ProfileID, profile.Version, profile.ProfileSHA256, profile.RegisteredBy, now); err != nil {
-			return fmt.Errorf("append agency profile activation event: %w", err)
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit agency profile registration: %w", err)
-	}
-	return nil
+		return nil
+	})
 }
 
 func ensureActiveAgencyProfile(ctx context.Context, tx pgx.Tx, profileID, version string) error {
