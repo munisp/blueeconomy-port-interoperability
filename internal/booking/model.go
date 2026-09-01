@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/munisp/blueeconomy-port-interoperability/internal/containerid"
 )
 
 type Status string
@@ -111,7 +113,6 @@ var (
 	terminalPattern       = regexp.MustCompile(`^[A-Z][A-Z0-9-]{1,31}$`)
 	portCodePattern       = regexp.MustCompile(`^[A-Z]{2,8}$`)
 	declarationRefPattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9/-]{3,63}$`)
-	containerIDPattern    = regexp.MustCompile(`^[A-Z]{4}[0-9]{7}$`)
 )
 
 type CreateRequest struct {
@@ -221,8 +222,8 @@ func (request CreateRequest) Validate() error {
 	if request.ExpiresAt.IsZero() || request.ExpiresAt.Before(time.Now().UTC()) {
 		return errors.New("expires_at must be in the future")
 	}
-	if request.ContainerID != "" && !containerIDPattern.MatchString(request.ContainerID) {
-		return errors.New("container_id must be an ISO 6346 container number")
+	if request.ContainerID != "" && !containerid.Valid(request.ContainerID) {
+		return errors.New("container_id must be an ISO 6346 container number with a valid check digit")
 	}
 	if request.CargoDeclarationRef == "" {
 		if request.DeclaredWeightKg != 0 || request.ConsigneeID != "" || request.OperatorID != "" {

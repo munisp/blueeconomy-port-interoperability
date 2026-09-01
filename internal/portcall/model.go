@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/munisp/blueeconomy-port-interoperability/internal/imonumber"
 )
 
 type Status string
@@ -28,7 +30,6 @@ var (
 )
 
 var portCodePattern = regexp.MustCompile(`^[A-Z]{2,8}$`)
-var imoPattern = regexp.MustCompile(`^[0-9]{7}$`)
 
 type CreateRequest struct {
 	CallID               string `json:"call_id"`
@@ -133,8 +134,8 @@ func (request CreateRequest) Validate() error {
 			return fmt.Errorf("%s must be canonical non-empty text of at most 256 characters", name)
 		}
 	}
-	if !imoPattern.MatchString(request.VesselIMO) {
-		return errors.New("vessel_imo must be exactly seven digits")
+	if !imonumber.Valid(request.VesselIMO) {
+		return errors.New("vessel_imo must be a seven-digit IMO number with a valid check digit")
 	}
 	if !portCodePattern.MatchString(request.PortCode) {
 		return errors.New("port_code must contain two to eight uppercase letters")

@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/munisp/blueeconomy-port-interoperability/internal/imonumber"
 )
 
 // Status is the mooring-master workflow state of an offshore terminal call.
@@ -60,7 +62,6 @@ var (
 
 var (
 	callIDPattern     = regexp.MustCompile(`^[A-Za-z0-9._:-]{2,64}$`)
-	imoPattern        = regexp.MustCompile(`^[0-9]{7}$`)
 	terminalPattern   = regexp.MustCompile(`^[A-Z0-9-]{2,16}$`)
 	agencyCodePattern = regexp.MustCompile(`^[A-Z]{2,8}$`)
 )
@@ -99,8 +100,8 @@ func (request CreateRequest) Validate() error {
 	if !callIDPattern.MatchString(request.CallID) {
 		return errors.New("call_id must be 2-64 canonical characters")
 	}
-	if !imoPattern.MatchString(request.VesselIMO) {
-		return errors.New("vessel_imo must be exactly seven digits")
+	if !imonumber.Valid(request.VesselIMO) {
+		return errors.New("vessel_imo must be a seven-digit IMO number with a valid check digit")
 	}
 	if !canonical(request.VesselName, 2, 256) {
 		return errors.New("vessel_name must be canonical text between 2 and 256 characters")
