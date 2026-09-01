@@ -20,7 +20,7 @@ import (
 
 // Principal is the verified actor behind a registry mutation; it becomes
 // the provenance block of every emitted platform event and the maker/checker
--- identity for dual-control transitions.
+// identity for dual-control transitions.
 type Principal struct {
 	ID   string
 	Role string
@@ -113,7 +113,7 @@ func scanVessel(row pgx.Row) (Vessel, error) {
 }
 
 // genesisHash is the previous_hash of the first ownership entry of a
--- vessel: a domain-separated commitment to the vessel identity, so a chain
+// vessel: a domain-separated commitment to the vessel identity, so a chain
 // cannot be transplanted from another vessel.
 func genesisHash(vesselID, imoNumber string) string {
 	sum := sha256.Sum256([]byte("registry-ownership-genesis\x00" + vesselID + "\x00" + imoNumber))
@@ -255,7 +255,7 @@ func (store *Store) Get(ctx context.Context, vesselID string) (Vessel, error) {
 }
 
 // List returns vessels visible to the tenant, optionally filtered by
--- status, in stable creation order.
+// status, in stable creation order.
 func (store *Store) List(ctx context.Context, status VesselStatus, limit int) ([]Vessel, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -390,7 +390,7 @@ func (store *Store) Transition(ctx context.Context, idempotencyKey, vesselID str
 }
 
 // TransferOwnership records an audited ownership change: the vessel row is
--- updated and a hash-chained history entry appended in the same
+// updated and a hash-chained history entry appended in the same
 // transaction, with a registry.vessel.v1 event.
 func (store *Store) TransferOwnership(ctx context.Context, idempotencyKey, vesselID, ownerName, ownerCountry string, effectiveFrom time.Time, principal Principal) (OwnershipEntry, error) {
 	if idempotencyKey == "" || len(idempotencyKey) > 256 {

@@ -1,9 +1,9 @@
 // Package registry implements the Phase 12 ministry-coverage modules: the
 // ship registry (IMO/MMSI-validated vessel registration with maker-checker
--- workflow and hash-chained ownership history), seafarer STCW certification
+// workflow and hash-chained ownership history), seafarer STCW certification
 // (issue/expiry, flag endorsements, metered third-party verification and an
 // expiry sweep) and cabotage enforcement (configurable Nigerian Coastal
--- Trade eligibility rules, permit workflow and violation flags). All stores
+// Trade eligibility rules, permit workflow and violation flags). All stores
 // are tenant-scoped under RLS via tenantdb.WithTx and lifecycle events are
 // JWS-signed into the platform outbox in the same transaction as the
 // mutation.
@@ -26,7 +26,7 @@ var ErrNotFound = errors.New("registry aggregate not found")
 
 // ErrConflict is returned when a state-machine transition is not legal from
 // the aggregate's current status, or when a uniqueness rule (open permit,
--- live IMO registration) is violated.
+// live IMO registration) is violated.
 var ErrConflict = errors.New("registry state conflict")
 
 // ErrMakerChecker is returned when the acting principal is the same person
@@ -52,7 +52,7 @@ const (
 
 // vesselTransitions is the closed registration state machine. CERTIFICATE_
 // ISSUED is the terminal success state; SUSPENDED is reachable from any
--- post-application state on flag-administration action and returns to
+// post-application state on flag-administration action and returns to
 // REGISTRATION on reinstatement; DEREGISTERED is terminal from any state.
 var vesselTransitions = map[VesselStatus][]VesselStatus{
 	VesselApplication:       {VesselSurvey, VesselDeregistered},

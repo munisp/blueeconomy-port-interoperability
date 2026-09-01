@@ -300,7 +300,7 @@ func (store *Store) IssueCertificate(ctx context.Context, idempotencyKey string,
 }
 
 // TransitionCertificate moves a certificate through its administration
--- state machine (SUSPEND / REINSTATE / REVOKE). EXPIRED is reserved for the
+// state machine (SUSPEND / REINSTATE / REVOKE). EXPIRED is reserved for the
 // sweep and is rejected here.
 func (store *Store) TransitionCertificate(ctx context.Context, idempotencyKey, certificateNumber string, target CertificateStatus, principal Principal) (Certificate, error) {
 	if idempotencyKey == "" || len(idempotencyKey) > 256 {
@@ -368,7 +368,7 @@ type Verification struct {
 
 // VerifyCertificate is the metered third-party verification path: every
 // call — hit or miss — appends a usage row the marketplace billing hook
--- aggregates. A certificate past its expiry date but not yet swept reports
+// aggregates. A certificate past its expiry date but not yet swept reports
 // EXPIRED (time comparison is authoritative, the sweep is bookkeeping).
 func (store *Store) VerifyCertificate(ctx context.Context, certificateNumber, verifierID string) (Verification, error) {
 	if len(certificateNumber) < 4 || len(certificateNumber) > 64 {
@@ -413,7 +413,7 @@ func (store *Store) VerifyCertificate(ctx context.Context, certificateNumber, ve
 }
 
 // ExpireCertificates transitions every ACTIVE certificate whose expiry
--- window has closed to EXPIRED for the tenant in context, emitting one
+// window has closed to EXPIRED for the tenant in context, emitting one
 // registry.seafarer.v1 event per certificate. It returns the number of
 // certificates expired; the sweep calls it once per tenant.
 func (store *Store) ExpireCertificates(ctx context.Context, principal Principal) (int, error) {

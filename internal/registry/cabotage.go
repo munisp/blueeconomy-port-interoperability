@@ -14,9 +14,9 @@ import (
 )
 
 // CabotageRule is the configurable Nigerian Coastal Trade eligibility
--- policy (Coastal and Inland Shipping (Cabotage) Act 2003): a cabotage
+// policy (Coastal and Inland Shipping (Cabotage) Act 2003): a cabotage
 // vessel must fly the required flag, meet the minimum national beneficial
--- ownership percentage and, when configured, have been built domestically.
+// ownership percentage and, when configured, have been built domestically.
 // A ministerial waiver may substitute for an unmet criterion only when the
 // rule permits waivers.
 type CabotageRule struct {
@@ -40,7 +40,7 @@ type CabotageFacts struct {
 
 // Eligibility is the deterministic evaluation of facts against a rule.
 // Eligible is true only when every required criterion is met; otherwise the
--- unmet criteria are reported and a waiver may still rescue the application
+// unmet criteria are reported and a waiver may still rescue the application
 // when the rule allows it.
 type Eligibility struct {
 	FlagCriterionMet      bool     `json:"flagCriterionMet"`
@@ -52,7 +52,7 @@ type Eligibility struct {
 }
 
 // EvaluateCabotage applies a rule to vessel facts. Pure and total: no I/O,
--- nil rule fails closed (not eligible, not waiverable).
+// nil rule fails closed (not eligible, not waiverable).
 func EvaluateCabotage(rule *CabotageRule, facts CabotageFacts) Eligibility {
 	if rule == nil {
 		return Eligibility{Unmet: []string{"no ACTIVE cabotage rule"}}
@@ -131,7 +131,7 @@ type Violation struct {
 }
 
 // UpsertCabotageRule installs a new ACTIVE rule, retiring the currently
--- active rule in the same transaction so exactly one rule governs at any
+// active rule in the same transaction so exactly one rule governs at any
 // time (the partial unique index enforces it). Rule change is governance,
 // so it requires a verified principal and emits registry.cabotage.v1.
 func (store *Store) UpsertCabotageRule(ctx context.Context, idempotencyKey string, rule CabotageRule, principal Principal) (CabotageRule, error) {
@@ -215,7 +215,7 @@ func scanPermit(row pgx.Row) (CabotagePermit, error) {
 }
 
 // ApplyPermit opens a cabotage permit application. Eligibility is evaluated
--- against the ACTIVE rule at application time and snapshotted onto the
+// against the ACTIVE rule at application time and snapshotted onto the
 // permit; when no ACTIVE rule exists the application fails closed.
 func (store *Store) ApplyPermit(ctx context.Context, idempotencyKey string, request ApplyPermitRequest, principal Principal) (CabotagePermit, Eligibility, error) {
 	if idempotencyKey == "" || len(idempotencyKey) > 256 {
@@ -317,7 +317,7 @@ func (store *Store) ApplyPermit(ctx context.Context, idempotencyKey string, requ
 }
 
 // DecidePermit is the checker step: approve or reject an APPLICATION. The
--- deciding officer must differ from the applicant (maker-checker); approval
+// deciding officer must differ from the applicant (maker-checker); approval
 // of a permit with unmet criteria requires the waiver reference recorded at
 // application time (enforced by the CHECK constraint too).
 func (store *Store) DecidePermit(ctx context.Context, idempotencyKey, permitID string, approve bool, principal Principal) (CabotagePermit, error) {
@@ -395,7 +395,7 @@ func (store *Store) GetPermit(ctx context.Context, permitID string) (CabotagePer
 }
 
 // FlagViolation raises a cabotage violation flag against a vessel (and,
--- when given, the permit). Open violations are visible to enforcement and
+// when given, the permit). Open violations are visible to enforcement and
 // the vessel registry in the same tenant scope.
 func (store *Store) FlagViolation(ctx context.Context, idempotencyKey string, violation Violation, principal Principal) (Violation, error) {
 	if idempotencyKey == "" || len(idempotencyKey) > 256 {
@@ -458,7 +458,7 @@ func (store *Store) FlagViolation(ctx context.Context, idempotencyKey string, vi
 }
 
 // ResolveViolation closes an OPEN violation; the resolver must differ from
--- the flagging officer (maker-checker on enforcement closure).
+// the flagging officer (maker-checker on enforcement closure).
 func (store *Store) ResolveViolation(ctx context.Context, idempotencyKey, violationID string, principal Principal) (Violation, error) {
 	if idempotencyKey == "" || len(idempotencyKey) > 256 {
 		return Violation{}, errors.New("idempotency key must be non-empty and at most 256 characters")

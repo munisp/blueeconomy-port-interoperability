@@ -14,7 +14,7 @@ import (
 )
 
 // These tests run against a real PostgreSQL when REGISTRY_TEST_DATABASE_URL
--- is set; otherwise they skip. The schema (migrations 0001-0023) is applied
+// is set; otherwise they skip. The schema (migrations 0001-0023) is applied
 // by the harness before the suite runs.
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()

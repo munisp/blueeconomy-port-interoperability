@@ -13,7 +13,7 @@ import (
 
 // sweepTenantFailures counts per-tenant certificate-expiry sweep failures
 // so operators can alert on a tenant stuck with lapsed certificates still
--- presenting ACTIVE.
+// presenting ACTIVE.
 var sweepTenantFailures = expvar.NewMap("registry_cert_sweep_tenant_failures")
 
 // CertificateSweeper runs the periodic seafarer-certificate expiry across

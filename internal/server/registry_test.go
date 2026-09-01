@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/registry"
 	"github.com/stretchr/testify/require"
 )
@@ -81,10 +81,16 @@ func (fake fakeRegistry) ResolveViolation(context.Context, string, string, regis
 	return registry.Violation{Status: "RESOLVED"}, nil
 }
 
-// withRegistry overrides the registry seam on the shared test handler.
+// registryTestHandler wires the shared test handler with the registry seam
+// overridden, matching the newWiredHandler pattern (unreachable pool; these
+// handler tests never reach the database).
 func registryTestHandler(t *testing.T, fake RegistryStore) http.Handler {
 	t.Helper()
+	pool, err := pgxpool.New(context.Background(), "postgres://127.0.0.1:1/unreachable")
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
 	config := testConfig()
+	config.Pool = pool
 	config.Registry = fake
 	handler, err := New(config)
 	require.NoError(t, err)
@@ -93,8 +99,7 @@ func registryTestHandler(t *testing.T, fake RegistryStore) http.Handler {
 
 func authedRequest(t *testing.T, method, path, body string, roles ...string) *http.Request {
 	t.Helper()
-	request := httptest.NewRequest(method, path, bytes.NewBufferString(body))
-	request.Header.Set("Content-Type", "application/json")
+	request := loopbackRequest(method, path, body)
 	request.Header.Set("Idempotency-Key", "test-idem-"+method+"-"+path)
 	request.Header.Set("Authorization", "Bearer "+mintToken(t, "registry-tester", roles...))
 	return request
