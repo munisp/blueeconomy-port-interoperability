@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/munisp/blueeconomy-port-interoperability/internal/imonumber"
 )
 
 // ManifestKind classifies the passenger service.
@@ -112,7 +114,6 @@ type Manifest struct {
 }
 
 var (
-	imoPattern         = regexp.MustCompile(`^[0-9]{7}$`)
 	referencePattern   = regexp.MustCompile(`^[A-Za-z0-9._:/-]{2,128}$`)
 	callRefPattern     = regexp.MustCompile(`^[A-Za-z0-9._:-]{2,64}$`)
 	nationalityPattern = regexp.MustCompile(`^[A-Z]{2,3}$`)
@@ -131,8 +132,8 @@ func validatePayload(payload Payload) (string, bool) {
 		return "call_reference must be 2-64 canonical characters", false
 	case payload.ManifestKind != string(KindCruise) && payload.ManifestKind != string(KindFerry):
 		return "manifest_kind must be CRUISE or FERRY", false
-	case !imoPattern.MatchString(payload.VesselIMO):
-		return "vessel_imo must be exactly seven digits", false
+	case !imonumber.Valid(payload.VesselIMO):
+		return "vessel_imo must be a seven-digit IMO number with a valid check digit", false
 	}
 	return "", true
 }

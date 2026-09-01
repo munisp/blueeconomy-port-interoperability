@@ -19,6 +19,8 @@ import (
 	"time"
 
 	jsoncanonicalizer "github.com/cyberphone/json-canonicalization/go/src/webpki.org/jsoncanonicalizer"
+
+	"github.com/munisp/blueeconomy-port-interoperability/internal/containerid"
 )
 
 // Chain lifecycle. The DB CHECK constraint enforces the same set.
@@ -69,13 +71,14 @@ var (
 )
 
 var (
-	containerPattern = regexp.MustCompile(`^[A-Z]{4}[0-9]{7}$`)
-	digestPattern    = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	orgPattern       = regexp.MustCompile(`^[^|]{2,128}$`)
+	digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	orgPattern    = regexp.MustCompile(`^[^|]{2,128}$`)
 )
 
-// ValidContainerID enforces ISO 6346 container numbers.
-func ValidContainerID(value string) bool { return containerPattern.MatchString(value) }
+// ValidContainerID enforces ISO 6346 container numbers, recomputing the
+// mandatory check digit (weighted 2^n mod 11) — a well-formed number with
+// a wrong check digit is rejected fail-closed.
+func ValidContainerID(value string) bool { return containerid.Valid(value) }
 
 // ValidDigest enforces lower-case hex SHA-256 digests.
 func ValidDigest(value string) bool { return digestPattern.MatchString(value) }
@@ -86,21 +89,21 @@ func ValidOrg(value string) bool { return orgPattern.MatchString(value) }
 
 // Chain is the release-chain aggregate root.
 type Chain struct {
-	ChainID        string     `json:"chain_id"`
-	TenantID       string     `json:"tenant_id"`
-	ContainerID    string     `json:"container_id"`
-	BLDigest       string     `json:"bl_digest"`
-	IssuerOrg      string     `json:"issuer_org"`
-	Status         Status     `json:"status"`
-	VelocityHold   bool       `json:"velocity_hold"`
-	HoldReason     *string    `json:"hold_reason,omitempty"`
-	RevokeReason   *string    `json:"revoke_reason,omitempty"`
-	ExpiresAt      time.Time  `json:"expires_at"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	Version        int64      `json:"version"`
-	Links          []Link     `json:"links,omitempty"`
-	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+	ChainID      string     `json:"chain_id"`
+	TenantID     string     `json:"tenant_id"`
+	ContainerID  string     `json:"container_id"`
+	BLDigest     string     `json:"bl_digest"`
+	IssuerOrg    string     `json:"issuer_org"`
+	Status       Status     `json:"status"`
+	VelocityHold bool       `json:"velocity_hold"`
+	HoldReason   *string    `json:"hold_reason,omitempty"`
+	RevokeReason *string    `json:"revoke_reason,omitempty"`
+	ExpiresAt    time.Time  `json:"expires_at"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	Version      int64      `json:"version"`
+	Links        []Link     `json:"links,omitempty"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 }
 
 // Link is one nomination edge in the chain (line -> forwarder ->
@@ -142,8 +145,8 @@ type Token struct {
 	ContainerID  string     `json:"container_id"`
 	HolderOrg    string     `json:"holder_org"`
 	TokenJWS     string     `json:"token_jws"`
-	IssuedAt     time.Time `json:"issued_at"`
-	ExpiresAt    time.Time `json:"expires_at"`
+	IssuedAt     time.Time  `json:"issued_at"`
+	ExpiresAt    time.Time  `json:"expires_at"`
 	ConsumedAt   *time.Time `json:"consumed_at,omitempty"`
 	ConsumedGate *string    `json:"consumed_gate,omitempty"`
 }
