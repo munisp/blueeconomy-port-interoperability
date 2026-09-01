@@ -20,6 +20,13 @@ const (
 	RoleCustomsOfficer    = "customs-officer"
 	RoleNPAOfficer        = "npa-officer"
 	RolePortOperatorAdmin = "port-operator-admin"
+	// RoleRegistryOfficer is the flag-administration (NIMASA) registry
+	// officer: vessel registration, seafarer certification, cabotage rule
+	// governance, permit decisions and violation enforcement.
+	RoleRegistryOfficer = "registry-officer"
+	// RoleRegistryVerifier is the metered third-party verifier identity for
+	// the certificate-verification endpoint (marketplace usage hook).
+	RoleRegistryVerifier = "registry-verifier"
 	// RolePaymentSwitch is the settlement-switch service identity. Only this
 	// role may confirm a booking payment; a tenant user can never confirm
 	// their own booking.
