@@ -39,6 +39,12 @@ const (
 	// TopicSecureChain carries Secure Chain (WP-7) verified-chain container
 	// release lifecycle events.
 	TopicSecureChain = "ports.securechain.v1"
+	// TopicRegistryVessel carries ship-registry registration lifecycle events.
+	TopicRegistryVessel = "registry.vessel.v1"
+	// TopicRegistrySeafarer carries seafarer certification lifecycle events.
+	TopicRegistrySeafarer = "registry.seafarer.v1"
+	// TopicRegistryCabotage carries cabotage permit and violation events.
+	TopicRegistryCabotage = "registry.cabotage.v1"
 )
 
 // validTopic reports whether the topic is a platform v1 contract topic.
@@ -46,7 +52,8 @@ func validTopic(topic string) bool {
 	switch topic {
 	case TopicBooking, TopicGate, TopicQueue, TopicDeclarations,
 		TopicOffshore, TopicManifests, TopicCruise, TopicRevenueAssessments,
-		TopicSecureChain:
+		TopicSecureChain, TopicRegistryVessel, TopicRegistrySeafarer,
+		TopicRegistryCabotage:
 		return true
 	default:
 		return false

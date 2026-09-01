@@ -26,6 +26,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/pushtokens"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/registry"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/securechain"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/server"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tariff"
@@ -263,6 +264,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("configure push-token store: %w", err)
 	}
+	// Phase 12 ministry-coverage surface: ship registry, seafarer
+	// certification and cabotage enforcement.
+	registryStore, err := registry.NewStore(pool, envelopeSigner)
+	if err != nil {
+		return fmt.Errorf("configure registry store: %w", err)
+	}
 	handler, err := server.New(server.Config{
 		Store:                     portcall.NewStore(pool),
 		Bookings:                  bookingStore,
@@ -274,6 +281,7 @@ func run() error {
 		Manifests:                 manifestStore,
 		Tariffs:                   tariff.NewStore(pool, envelopeSigner),
 		PushTokens:                pushTokenStore,
+		Registry:                  registryStore,
 		DeclarationScorer:         declarationScorer,
 		DeclarationHighValueMinor: highValueMinor,
 		Payments:                  paymentsGateway,

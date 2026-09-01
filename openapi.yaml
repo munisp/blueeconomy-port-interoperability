@@ -1,10 +1,9 @@
 # blueeconomy-port-interoperability HTTP API.
 #
-# Coverage note: this document currently describes the mobile push-token
-# surface only (added with the /v1/push-tokens implementation). The wider
-# route surface (port calls, bookings, queue, declarations, secure chain,
-# vessel ops) predates this document and is documented route-by-route as it
-# is touched.
+# Coverage note: this document describes the mobile push-token surface and
+# the Phase 12 registry surface (/v1/registry/*). The wider route surface
+# (port calls, bookings, queue, declarations, secure chain, vessel ops)
+# predates this document and is documented route-by-route as it is touched.
 openapi: 3.0.3
 info:
   title: blueeconomy-port-interoperability
@@ -80,13 +79,687 @@ paths:
         '404':
           description: Unknown or already-revoked device
 
+  /v1/registry/vessels:
+    post:
+      summary: Open a vessel registration application
+      description: >-
+        Registers a vessel into the ship registry. The IMO number must pass
+        the weighted mod-10 check digit and the MMSI must be a nine-digit
+        ship-station identity with a platform-admitted ITU MID; both fail
+        closed with 400. The initial ownership record starts the hash-chained
+        ownership history and a registry.vessel.v1 event is emitted.
+      security:
+        - tenantGatewayToken: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterVesselRequest'
+      responses:
+        '201':
+          description: Registration application opened
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vessel'
+        '400':
+          description: Validation failure (incl. IMO/MMSI check failures)
+        '401':
+          description: Missing/invalid tenant gateway token
+        '403':
+          description: Caller lacks the registry-officer role
+    get:
+      summary: List vessels visible to the tenant
+      security:
+        - tenantGatewayToken: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [APPLICATION, SURVEY, REGISTRATION, CERTIFICATE_ISSUED, SUSPENDED, DEREGISTERED]
+      responses:
+        '200':
+          description: Vessels in stable creation order
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Vessel'
+        '401':
+          description: Missing/invalid tenant gateway token
+
+  /v1/registry/vessels/{vesselId}:
+    get:
+      summary: Read one vessel aggregate
+      security:
+        - tenantGatewayToken: []
+      parameters:
+        - name: vesselId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The vessel aggregate
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vessel'
+        '404':
+          description: Unknown vessel
+
+  /v1/registry/vessels/{vesselId}/transitions:
+    post:
+      summary: Advance the vessel registration workflow
+      description: >-
+        APPLICATION → SURVEY → REGISTRATION → CERTIFICATE_ISSUED with
+        maker-checker on the REGISTRATION and CERTIFICATE_ISSUED steps (the
+        deciding officer must differ from the application maker). Certificate
+        issuance requires a certificate number. SUSPENDED/DEREGISTERED follow
+        the closed state machine.
+      security:
+        - tenantGatewayToken: []
+      parameters:
+        - name: vesselId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target]
+              properties:
+                target:
+                  type: string
+                  enum: [SURVEY, REGISTRATION, CERTIFICATE_ISSUED, SUSPENDED, DEREGISTERED]
+                certificateNumber:
+                  type: string
+                  minLength: 4
+                  maxLength: 64
+      responses:
+        '200':
+          description: Transition applied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vessel'
+        '404':
+          description: Unknown vessel
+        '409':
+          description: Illegal transition or maker-checker violation
+
+  /v1/registry/vessels/{vesselId}/ownership:
+    post:
+      summary: Transfer vessel ownership (hash-chained history)
+      security:
+        - tenantGatewayToken: []
+      parameters:
+        - name: vesselId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ownerName, ownerCountry, effectiveFrom]
+              properties:
+                ownerName:
+                  type: string
+                ownerCountry:
+                  type: string
+                  pattern: '^[A-Z]{2}$'
+                effectiveFrom:
+                  type: string
+                  format: date-time
+      responses:
+        '200':
+          description: Ownership entry appended to the hash chain
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OwnershipEntry'
+        '404':
+          description: Unknown vessel
+        '409':
+          description: Vessel deregistered
+    get:
+      summary: Read the verified ownership hash chain of a vessel
+      description: >-
+        Every entry hash is recomputed and chain continuity verified before
+        returning; a tampered history fails closed with an error.
+      security:
+        - tenantGatewayToken: []
+      parameters:
+        - name: vesselId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Ownership entries in chain order
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OwnershipEntry'
+        '404':
+          description: Unknown vessel
+
+  /v1/registry/seafarers:
+    post:
+      summary: Enrol a seafarer
+      security:
+        - tenantGatewayToken: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterSeafarerRequest'
+      responses:
+        '201':
+          description: Seafarer enrolled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Seafarer'
+        '400':
+          description: Validation failure
+
+  /v1/registry/seafarers/{seafarerId}/certificates:
+    post:
+      summary: Issue an STCW certificate to a seafarer
+      security:
+        - tenantGatewayToken: []
+      parameters:
+        - name: seafarerId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IssueCertificateRequest'
+      responses:
+        '201':
+          description: Certificate issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Certificate'
+        '400':
+          description: Validation failure (incl. non-admitted STCW class)
+        '404':
+          description: Unknown seafarer
+
+  /v1/registry/certificates/{certificateNumber}/transitions:
+    post:
+      summary: Transition a certificate (SUSPENDED/ACTIVE/REVOKED)
+      description: >-
+        EXPIRED is reserved for the expiry sweep and is rejected here.
+      security:
+        - tenantGatewayToken: []
+      parameters:
+        - name: certificateNumber
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target]
+              properties:
+                target:
+                  type: string
+                  enum: [ACTIVE, SUSPENDED, REVOKED]
+      responses:
+        '200':
+          description: Transition applied
+        '404':
+          description: Unknown certificate
+        '409':
+          description: Illegal transition
+
+  /v1/registry/certificates/verify:
+    get:
+      summary: Metered third-party certificate verification
+      description: >-
+        Verifies a certificate for a third party (registry-verifier role).
+        Every call — hit or miss — appends a usage row compatible with the
+        marketplace metering hook; the verified token subject is the metering
+        identity.
+      security:
+        - tenantGatewayToken: []
+      parameters:
+        - name: certificateNumber
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Verification outcome (VALID | EXPIRED | SUSPENDED | REVOKED | NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Verification'
+        '403':
+          description: Caller lacks the registry-verifier role
+
+  /v1/registry/cabotage-rules:
+    post:
+      summary: Install a new ACTIVE cabotage eligibility rule
+      description: >-
+        Retires the currently ACTIVE rule in the same transaction so exactly
+        one rule governs eligibility evaluation at any time.
+      security:
+        - tenantGatewayToken: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CabotageRule'
+      responses:
+        '201':
+          description: Rule installed
+        '400':
+          description: Validation failure
+
+  /v1/registry/cabotage-permits:
+    post:
+      summary: Apply for a cabotage permit (eligibility evaluated)
+      description: >-
+        Evaluates the vessel against the ACTIVE rule (flag, national
+        ownership, domestic build). Applications with unmet criteria require
+        a ministerial waiver reference and a waiver-permitting rule; with no
+        ACTIVE rule the application fails closed.
+      security:
+        - tenantGatewayToken: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApplyPermitRequest'
+      responses:
+        '201':
+          description: Permit application opened with the eligibility snapshot
+        '404':
+          description: Unknown vessel
+        '409':
+          description: Ineligible without waiver, no ACTIVE rule, or vessel not CERTIFICATE_ISSUED
+
+  /v1/registry/cabotage-permits/{permitId}/decision:
+    post:
+      summary: Approve or reject a cabotage permit (maker-checker)
+      security:
+        - tenantGatewayToken: []
+      parameters:
+        - name: permitId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approve]
+              properties:
+                approve:
+                  type: boolean
+      responses:
+        '200':
+          description: Decision recorded
+        '404':
+          description: Unknown permit
+        '409':
+          description: Not APPLICATION, maker-checker violation, or unmet criteria without waiver
+
+  /v1/registry/cabotage-violations:
+    post:
+      summary: Flag a cabotage violation against a vessel
+      security:
+        - tenantGatewayToken: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FlagViolationRequest'
+      responses:
+        '201':
+          description: Violation flagged OPEN
+        '404':
+          description: Unknown vessel or permit
+
+  /v1/registry/cabotage-violations/{violationId}/resolution:
+    post:
+      summary: Resolve an OPEN violation (maker-checker)
+      security:
+        - tenantGatewayToken: []
+      parameters:
+        - name: violationId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Violation resolved
+        '404':
+          description: Unknown open violation
+        '409':
+          description: Resolved by its flagging officer (maker-checker)
+
 components:
   securitySchemes:
     tenantGatewayToken:
       type: http
       scheme: bearer
       bearerFormat: JWT
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 256
   schemas:
+    RegisterVesselRequest:
+      type: object
+      required: [vesselId, imoNumber, mmsi, vesselName, flagState, classSociety, grossTonnage, buildYear, buildCountry, ownerName, ownerCountry]
+      additionalProperties: false
+      properties:
+        vesselId:
+          type: string
+          pattern: '^[A-Za-z0-9._:-]{1,64}$'
+        imoNumber:
+          type: string
+          pattern: '^[0-9]{7}$'
+          description: Seven-digit IMO number; weighted mod-10 check digit enforced
+        mmsi:
+          type: string
+          pattern: '^[1-9][0-9]{8}$'
+          description: Nine-digit ship-station MMSI; MID must be platform-admitted
+        vesselName:
+          type: string
+        flagState:
+          type: string
+          pattern: '^[A-Z]{2}$'
+        classSociety:
+          type: string
+        grossTonnage:
+          type: integer
+          minimum: 1
+        buildYear:
+          type: integer
+          minimum: 1800
+          maximum: 2100
+        buildCountry:
+          type: string
+          pattern: '^[A-Z]{2}$'
+        ownerName:
+          type: string
+        ownerCountry:
+          type: string
+          pattern: '^[A-Z]{2}$'
+    Vessel:
+      type: object
+      properties:
+        vesselId:
+          type: string
+        imoNumber:
+          type: string
+        mmsi:
+          type: string
+        vesselName:
+          type: string
+        flagState:
+          type: string
+        classSociety:
+          type: string
+        grossTonnage:
+          type: integer
+        buildYear:
+          type: integer
+        buildCountry:
+          type: string
+        ownerName:
+          type: string
+        ownerCountry:
+          type: string
+        status:
+          type: string
+          enum: [APPLICATION, SURVEY, REGISTRATION, CERTIFICATE_ISSUED, SUSPENDED, DEREGISTERED]
+        certificateNumber:
+          type: string
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        version:
+          type: integer
+    OwnershipEntry:
+      type: object
+      properties:
+        vesselId:
+          type: string
+        sequenceNo:
+          type: integer
+        ownerName:
+          type: string
+        ownerCountry:
+          type: string
+        effectiveFrom:
+          type: string
+          format: date-time
+        recordedBy:
+          type: string
+        recordedAt:
+          type: string
+          format: date-time
+        previousHash:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        entryHash:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+    RegisterSeafarerRequest:
+      type: object
+      required: [seafarerId, fullName, dateOfBirth, nationality, rank]
+      additionalProperties: false
+      properties:
+        seafarerId:
+          type: string
+        fullName:
+          type: string
+        dateOfBirth:
+          type: string
+          format: date
+        nationality:
+          type: string
+          pattern: '^[A-Z]{2}$'
+        rank:
+          type: string
+    Seafarer:
+      type: object
+      properties:
+        seafarerId:
+          type: string
+        fullName:
+          type: string
+        dateOfBirth:
+          type: string
+          format: date-time
+        nationality:
+          type: string
+        rank:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, SUSPENDED, DECEASED]
+    IssueCertificateRequest:
+      type: object
+      required: [certificateNumber, certificateType, issuingAuthority, flagEndorsement, issuedAt, expiresAt]
+      additionalProperties: false
+      properties:
+        certificateNumber:
+          type: string
+          minLength: 4
+          maxLength: 64
+        certificateType:
+          type: string
+          enum: [STCW-II-1, STCW-II-2, STCW-II-3, STCW-III-1, STCW-III-2, STCW-III-3, STCW-V-1, STCW-VI-1, STCW-VI-2, STCW-VI-3, STCW-VI-6, GMDSS-GOC]
+        issuingAuthority:
+          type: string
+        flagEndorsement:
+          type: string
+          pattern: '^[A-Z]{2}$'
+        issuedAt:
+          type: string
+          format: date
+        expiresAt:
+          type: string
+          format: date
+    Certificate:
+      type: object
+      properties:
+        certificateNumber:
+          type: string
+        seafarerId:
+          type: string
+        certificateType:
+          type: string
+        issuingAuthority:
+          type: string
+        flagEndorsement:
+          type: string
+        issuedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [ACTIVE, EXPIRED, SUSPENDED, REVOKED]
+    Verification:
+      type: object
+      properties:
+        certificateNumber:
+          type: string
+        outcome:
+          type: string
+          enum: [VALID, EXPIRED, SUSPENDED, REVOKED, NOT_FOUND]
+        certificateType:
+          type: string
+        flagEndorsement:
+          type: string
+        expiresAt:
+          type: string
+        usageId:
+          type: string
+          description: Metering record id for the marketplace usage hook
+    CabotageRule:
+      type: object
+      required: [ruleId, requiredFlag, minNationalOwnershipPct, requireDomesticBuild, waiverAllowed]
+      additionalProperties: false
+      properties:
+        ruleId:
+          type: string
+        requiredFlag:
+          type: string
+          pattern: '^[A-Z]{2}$'
+        minNationalOwnershipPct:
+          type: integer
+          minimum: 0
+          maximum: 100
+        requireDomesticBuild:
+          type: boolean
+        waiverAllowed:
+          type: boolean
+    ApplyPermitRequest:
+      type: object
+      required: [permitId, vesselId, nationalOwnershipPct, tradeRoute]
+      additionalProperties: false
+      properties:
+        permitId:
+          type: string
+        vesselId:
+          type: string
+        nationalOwnershipPct:
+          type: integer
+          minimum: 0
+          maximum: 100
+        tradeRoute:
+          type: string
+        waiverReference:
+          type: string
+          minLength: 4
+    FlagViolationRequest:
+      type: object
+      required: [violationId, vesselId, violationType, detail]
+      additionalProperties: false
+      properties:
+        violationId:
+          type: string
+        vesselId:
+          type: string
+        permitId:
+          type: string
+        violationType:
+          type: string
+          enum: [NO_PERMIT, EXPIRED_PERMIT, ROUTE_OUTSIDE_PERMIT, CRITERION_LAPSED]
+        detail:
+          type: string
+
     PushTokenRegisterRequest:
       type: object
       required: [deviceId, token, platform]

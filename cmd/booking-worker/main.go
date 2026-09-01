@@ -23,6 +23,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/events"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/ledger"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/registry"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/securechain"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/telemetry"
 	"go.temporal.io/sdk/client"
@@ -199,9 +200,22 @@ func run() error {
 		return fmt.Errorf("configure call-up sweeper: %w", err)
 	}
 
+	// Phase 12: expired-certificate sweep follows the same multi-tenant
+	// sweeper pattern as the call-up sweep.
+	registryStore, err := registry.NewStore(pool, envelopeSigner)
+	if err != nil {
+		return fmt.Errorf("configure registry store for certificate sweep: %w", err)
+	}
+	certificateSweeper, err := registry.NewCertificateSweeper(pool, registryStore,
+		registry.Principal{ID: "registry-sweeper", Role: "registry-officer"}, tenantID)
+	if err != nil {
+		return fmt.Errorf("configure certificate sweeper: %w", err)
+	}
+
 	sweepCtx, stopSweep := context.WithCancel(context.Background())
 	defer stopSweep()
 	go sweepCallUps(sweepCtx, sweeper, time.Duration(sweepSeconds)*time.Second)
+	go sweepCertificates(sweepCtx, certificateSweeper, time.Duration(sweepSeconds)*time.Second)
 
 	log.Printf("booking-worker polling task queue %s", taskQueue)
 	if err := bookingWorker.Run(worker.InterruptCh()); err != nil {
@@ -217,6 +231,29 @@ func sweepCallUps(ctx context.Context, sweeper *queue.Sweeper, interval time.Dur
 	sweep := func() {
 		if err := sweeper.SweepOnce(ctx); err != nil {
 			log.Printf("call-up sweep: %v", err)
+		}
+	}
+	sweep()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
+	}
+}
+
+// sweepCertificates runs the multi-tenant seafarer-certificate expiry sweep
+// immediately and then on every interval tick. Sweep failures are logged and
+// retried on the next tick; lapsed certificates remain visible to the next
+// pass and the verification endpoint already reports them EXPIRED.
+func sweepCertificates(ctx context.Context, sweeper *registry.CertificateSweeper, interval time.Duration) {
+	sweep := func() {
+		if err := sweeper.SweepOnce(ctx); err != nil {
+			log.Printf("certificate expiry sweep: %v", err)
 		}
 	}
 	sweep()

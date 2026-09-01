@@ -138,6 +138,7 @@ func testConfig() Config {
 		SecureChains:      mustSecureChainStore(),
 		Tariffs:           tariff.NewStore(nil, mustSigner()),
 		PushTokens:        fakePushTokens{},
+		Registry:          fakeRegistry{},
 		DeclarationScorer: fakeScorer{},
 		Payments:          fakePayments{},
 		Orchestrator:      fakeOrchestrator{},

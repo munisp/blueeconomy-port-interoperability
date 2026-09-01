@@ -20,6 +20,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/pushtokens"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/registry"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/securechain"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tariff"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
@@ -30,6 +31,29 @@ import (
 type PushTokenStore interface {
 	Register(context.Context, pushtokens.RegisterRequest) (pushtokens.Token, error)
 	Revoke(context.Context, string) (pushtokens.Token, error)
+}
+
+// RegistryStore is the Phase 12 ship-registry / seafarer-certification /
+// cabotage persistence seam consumed by the /v1/registry handlers.
+// *registry.Store satisfies this seam; the interface keeps the handlers
+// testable without a database.
+type RegistryStore interface {
+	Register(context.Context, string, registry.RegisterVesselRequest, registry.Principal) (registry.Vessel, error)
+	Get(context.Context, string) (registry.Vessel, error)
+	List(context.Context, registry.VesselStatus, int) ([]registry.Vessel, error)
+	OwnershipHistory(context.Context, string) ([]registry.OwnershipEntry, error)
+	Transition(context.Context, string, string, registry.VesselStatus, string, registry.Principal) (registry.Vessel, error)
+	TransferOwnership(context.Context, string, string, string, string, time.Time, registry.Principal) (registry.OwnershipEntry, error)
+	RegisterSeafarer(context.Context, string, registry.RegisterSeafarerRequest, registry.Principal) (registry.Seafarer, error)
+	IssueCertificate(context.Context, string, registry.IssueCertificateRequest, registry.Principal) (registry.Certificate, error)
+	TransitionCertificate(context.Context, string, string, registry.CertificateStatus, registry.Principal) (registry.Certificate, error)
+	VerifyCertificate(context.Context, string, string) (registry.Verification, error)
+	UpsertCabotageRule(context.Context, string, registry.CabotageRule, registry.Principal) (registry.CabotageRule, error)
+	ApplyPermit(context.Context, string, registry.ApplyPermitRequest, registry.Principal) (registry.CabotagePermit, registry.Eligibility, error)
+	DecidePermit(context.Context, string, string, bool, registry.Principal) (registry.CabotagePermit, error)
+	GetPermit(context.Context, string) (registry.CabotagePermit, error)
+	FlagViolation(context.Context, string, registry.Violation, registry.Principal) (registry.Violation, error)
+	ResolveViolation(context.Context, string, string, registry.Principal) (registry.Violation, error)
 }
 
 // Config wires every security and integration dependency. New fails closed
@@ -54,6 +78,10 @@ type Config struct {
 	// *pushtokens.Store satisfies this seam; the interface keeps the
 	// handler testable without a database.
 	PushTokens PushTokenStore
+	// Registry is the Phase 12 ship-registry / seafarer-certification /
+	// cabotage store; mandatory — the /v1/registry surface fails closed
+	// without it. *registry.Store satisfies this seam.
+	Registry RegistryStore
 	// DeclarationScorer is the fail-closed risk-scoring boundary; declaration
 	// submission cannot proceed without it.
 	DeclarationScorer declarations.Scorer
@@ -87,6 +115,7 @@ type Server struct {
 	manifests                 *manifests.Store
 	tariffs                   *tariff.Store
 	pushTokens                PushTokenStore
+	registry                  RegistryStore
 	declarationScorer         declarations.Scorer
 	declarationHighValueMinor int64
 	payments                  payments.Gateway
@@ -107,6 +136,9 @@ func New(config Config) (http.Handler, error) {
 	}
 	if config.PushTokens == nil {
 		return nil, errors.New("server requires a push-token store")
+	}
+	if config.Registry == nil {
+		return nil, errors.New("server requires a registry store")
 	}
 	if config.Payments == nil || config.Orchestrator == nil || config.CallUps == nil {
 		return nil, errors.New("server requires a payments gateway and workflow orchestrators")
@@ -134,6 +166,7 @@ func New(config Config) (http.Handler, error) {
 		manifests:                 config.Manifests,
 		tariffs:                   config.Tariffs,
 		pushTokens:                config.PushTokens,
+		registry:                  config.Registry,
 		declarationScorer:         config.DeclarationScorer,
 		declarationHighValueMinor: config.DeclarationHighValueMinor,
 		payments:                  config.Payments,
@@ -180,6 +213,21 @@ func New(config Config) (http.Handler, error) {
 	api.HandleFunc("POST /v1/cruise-calls/", server.cruiseCallOperation)
 	api.HandleFunc("POST /v1/push-tokens", server.registerPushToken)
 	api.HandleFunc("POST /v1/push-tokens/revoke", server.revokePushToken)
+	// Phase 12 ministry-coverage surface: ship registry, seafarer
+	// certification and cabotage enforcement.
+	api.HandleFunc("POST /v1/registry/vessels", server.registerVessel)
+	api.HandleFunc("GET /v1/registry/vessels", server.listVessels)
+	api.HandleFunc("GET /v1/registry/vessels/", server.registryVesselRead)
+	api.HandleFunc("POST /v1/registry/vessels/", server.registryVesselOperation)
+	api.HandleFunc("POST /v1/registry/seafarers", server.registerSeafarer)
+	api.HandleFunc("POST /v1/registry/seafarers/", server.registrySeafarerOperation)
+	api.HandleFunc("GET /v1/registry/certificates/verify", server.verifyCertificate)
+	api.HandleFunc("POST /v1/registry/certificates/", server.certificateOperation)
+	api.HandleFunc("POST /v1/registry/cabotage-rules", server.upsertCabotageRule)
+	api.HandleFunc("POST /v1/registry/cabotage-permits", server.applyCabotagePermit)
+	api.HandleFunc("POST /v1/registry/cabotage-permits/", server.cabotagePermitOperation)
+	api.HandleFunc("POST /v1/registry/cabotage-violations", server.flagCabotageViolation)
+	api.HandleFunc("POST /v1/registry/cabotage-violations/", server.cabotageViolationOperation)
 
 	nswIngress, err := nswsecurity.NewIngress(nswsecurity.IngressConfig{
 		SignatureHeader: "X-NSW-Signature",
