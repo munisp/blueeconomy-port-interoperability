@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/booking"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/cruise"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/declarations"
@@ -23,6 +24,10 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/offshore"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/pcs"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/pcs/ais"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/pcs/linkage"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/pcs/tos"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/pushtokens"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
@@ -270,6 +275,16 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("configure registry store: %w", err)
 	}
+	// Phase 16 PCS integrations (GAP-PCS-AIS, GAP-BERTH-OPS,
+	// GAP-PORTCALL-LINKAGE). Each leg is env-gated: when AIS_FEED_URL /
+	// TOS_ENDPOINT are unset the leg is absent and the /v1/pcs surface
+	// reports configured:false / 503 honestly. When an operator sets the
+	// variables, invalid configuration fails the boot — a partially
+	// configured integration is never silently degraded.
+	pcsService, err := configurePCS(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("configure PCS integrations: %w", err)
+	}
 	handler, err := server.New(server.Config{
 		Store:                     portcall.NewStore(pool),
 		Bookings:                  bookingStore,
@@ -294,6 +309,7 @@ func run() error {
 		Pool:                      pool,
 		FGNShareBasisPoints:       fgnShareBPS,
 		NSWReplayTTL:              time.Duration(replayTTLMinutes) * time.Minute,
+		PCS:                       pcsService,
 	})
 	if err != nil {
 		return fmt.Errorf("build server: %w", err)
@@ -319,6 +335,85 @@ func run() error {
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
+}
+
+// configurePCS builds the Phase 16 PCS aggregate from the environment.
+// AIS_FEED_URL/AIS_API_KEY enable the AIS ingestion leg (PostgreSQL-backed,
+// polling goroutine); TOS_ENDPOINT/TOS_API_KEY enable the TOS berth/ops
+// leg. The NSW port-call linkage anchor is always wired from the platform
+// database. A set-but-invalid configuration fails the boot.
+func configurePCS(ctx context.Context, pool *pgxpool.Pool) (*pcs.Service, error) {
+	service := &pcs.Service{}
+	var aisPositions linkage.AISPositions
+	if feedURL := strings.TrimSpace(os.Getenv("AIS_FEED_URL")); feedURL != "" {
+		pollInterval, err := time.ParseDuration(defaultEnv("AIS_POLL_INTERVAL", "60s"))
+		if err != nil {
+			return nil, fmt.Errorf("AIS_POLL_INTERVAL must be a duration: %w", err)
+		}
+		timeout, err := time.ParseDuration(defaultEnv("AIS_TIMEOUT", "10s"))
+		if err != nil {
+			return nil, fmt.Errorf("AIS_TIMEOUT must be a duration: %w", err)
+		}
+		client, err := ais.NewClient(ais.Config{
+			FeedURL:      feedURL,
+			APIKey:       os.Getenv("AIS_API_KEY"),
+			PollInterval: pollInterval,
+			Timeout:      timeout,
+		})
+		if err != nil {
+			return nil, err
+		}
+		store, err := ais.NewPgStore(pool)
+		if err != nil {
+			return nil, err
+		}
+		ingester, err := ais.NewIngester(client, store, pollInterval)
+		if err != nil {
+			return nil, err
+		}
+		go ingester.Run(ctx)
+		service.AIS = ingester
+		aisPositions = ingester
+		log.Printf("pcs: AIS ingestion enabled (poll %s)", pollInterval)
+	} else {
+		log.Printf("pcs: AIS_FEED_URL not set; AIS leg disabled (configured:false)")
+	}
+	var tosAssignments linkage.TOSAssignments
+	if endpoint := strings.TrimSpace(os.Getenv("TOS_ENDPOINT")); endpoint != "" {
+		timeout, err := time.ParseDuration(defaultEnv("TOS_TIMEOUT", "10s"))
+		if err != nil {
+			return nil, fmt.Errorf("TOS_TIMEOUT must be a duration: %w", err)
+		}
+		threshold, err := strconv.Atoi(defaultEnv("TOS_BREAKER_THRESHOLD", "5"))
+		if err != nil {
+			return nil, fmt.Errorf("TOS_BREAKER_THRESHOLD must be an integer: %w", err)
+		}
+		cooldown, err := time.ParseDuration(defaultEnv("TOS_BREAKER_COOLDOWN", "30s"))
+		if err != nil {
+			return nil, fmt.Errorf("TOS_BREAKER_COOLDOWN must be a duration: %w", err)
+		}
+		client, err := tos.NewClient(tos.Config{
+			Endpoint:         endpoint,
+			APIKey:           os.Getenv("TOS_API_KEY"),
+			Timeout:          timeout,
+			BreakerThreshold: threshold,
+			BreakerCooldown:  cooldown,
+		})
+		if err != nil {
+			return nil, err
+		}
+		service.TOS = client
+		tosAssignments = client
+		log.Printf("pcs: TOS adapter enabled")
+	} else {
+		log.Printf("pcs: TOS_ENDPOINT not set; TOS leg disabled (configured:false)")
+	}
+	linker, err := linkage.NewLinker(portcall.NewStore(pool), aisPositions, tosAssignments)
+	if err != nil {
+		return nil, err
+	}
+	service.Linker = linker
+	return service, nil
 }
 
 func allowedKIDs(value string) map[string]time.Time {

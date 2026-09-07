@@ -17,6 +17,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/nswsecurity"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/offshore"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/pcs"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/pushtokens"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
@@ -102,6 +103,10 @@ type Config struct {
 	FGNShareBasisPoints int64
 	// NSWReplayTTL bounds how long ingress replay hashes are retained.
 	NSWReplayTTL time.Duration
+	// PCS is the Phase 16 Port Community System aggregate (AIS ingestion,
+	// TOS berth/ops adapter, AIS↔TOS↔NSW port-call linkage). Optional:
+	// when nil the /v1/pcs routes stay mounted and answer 503 honestly.
+	PCS *pcs.Service
 }
 
 type Server struct {
@@ -122,6 +127,7 @@ type Server struct {
 	orchestrator              booking.Orchestrator
 	callUps                   queue.CallUpOrchestrator
 	fgnShareBPS               int64
+	pcs                       *pcs.Service
 }
 
 func New(config Config) (http.Handler, error) {
@@ -173,6 +179,7 @@ func New(config Config) (http.Handler, error) {
 		orchestrator:              config.Orchestrator,
 		callUps:                   config.CallUps,
 		fgnShareBPS:               config.FGNShareBasisPoints,
+		pcs:                       config.PCS,
 	}
 	api := http.NewServeMux()
 	api.HandleFunc("GET /v1/partner-capabilities", server.partnerCapabilities)
@@ -228,6 +235,14 @@ func New(config Config) (http.Handler, error) {
 	api.HandleFunc("POST /v1/registry/cabotage-permits/", server.cabotagePermitOperation)
 	api.HandleFunc("POST /v1/registry/cabotage-violations", server.flagCabotageViolation)
 	api.HandleFunc("POST /v1/registry/cabotage-violations/", server.cabotageViolationOperation)
+	// Phase 16 PCS surface (GAP-PCS-AIS, GAP-BERTH-OPS,
+	// GAP-PORTCALL-LINKAGE): AIS status/positions, TOS berth occupancy and
+	// the AIS↔TOS↔NSW port-call linkage. Config-gated fail-closed.
+	api.HandleFunc("GET /v1/pcs/status", server.pcsStatus)
+	api.HandleFunc("GET /v1/pcs/ais/status", server.pcsAISStatus)
+	api.HandleFunc("GET /v1/pcs/ais/positions", server.pcsAISPositions)
+	api.HandleFunc("GET /v1/pcs/tos/berths", server.pcsTOSBerths)
+	api.HandleFunc("GET /v1/pcs/portcalls", server.pcsPortCalls)
 
 	nswIngress, err := nswsecurity.NewIngress(nswsecurity.IngressConfig{
 		SignatureHeader: "X-NSW-Signature",
