@@ -17,9 +17,9 @@ import (
 // identity is always the verified token subject — no body field can
 // substitute for it.
 const (
-	RoleShippingLine      = "shipping-line"
-	RoleTerminalOperator  = "terminal-operator"
-	secureChainPrincipal  = "secure-chain-api"
+	RoleShippingLine     = "shipping-line"
+	RoleTerminalOperator = "terminal-operator"
+	secureChainPrincipal = "secure-chain-api"
 )
 
 func secureChainPrincipalOf(claims tenantctx.Claims, role string) securechain.Principal {
@@ -68,8 +68,8 @@ func (server *Server) registerBLAuthority(response http.ResponseWriter, request 
 		return
 	}
 	writeJSON(response, http.StatusCreated, map[string]string{
-		"container_id": strings.ToUpper(strings.TrimSpace(input.ContainerID)),
-		"bl_digest":    input.BLDigest,
+		"container_id":  strings.ToUpper(strings.TrimSpace(input.ContainerID)),
+		"bl_digest":     input.BLDigest,
 		"shipping_line": claims.Subject,
 	})
 }

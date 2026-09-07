@@ -295,7 +295,38 @@ go build ./... && go vet ./... && go test ./...
 - **Tenant isolation**: direct psql sessions see no rows until
   `SET app.tenant_id = '<tenant>'` because RLS is FORCE-enabled.
 
+## PCS integrations (Phase 16)
+
+The `/v1/pcs` surface closes GAP-PCS-AIS, GAP-BERTH-OPS and
+GAP-PORTCALL-LINKAGE. Every leg is env-gated and fail-closed: when a leg is
+unconfigured its status reports `configured:false` and its data endpoints
+answer `503` — no synthetic data is ever served. Routes require a verified
+`npa-officer` or `port-operator-admin` token.
+
+| Variable | Purpose |
+| --- | --- |
+| `AIS_FEED_URL` | HTTPS AIS feed base URL; unset disables the AIS leg |
+| `AIS_API_KEY` | Bearer credential for the AIS feed (env-only) |
+| `AIS_POLL_INTERVAL` | Poll cadence, default `60s` (minimum `5s`) |
+| `AIS_TIMEOUT` | Per-request feed timeout, default `10s` |
+| `TOS_ENDPOINT` | HTTPS Terminal Operating System base URL; unset disables the TOS leg |
+| `TOS_API_KEY` | Bearer credential for the TOS (env-only) |
+| `TOS_TIMEOUT` | Per-request TOS timeout, default `10s` |
+| `TOS_BREAKER_THRESHOLD` | Consecutive failures before the TOS circuit breaker opens, default `5` |
+| `TOS_BREAKER_COOLDOWN` | Open-state dwell before a half-open trial, default `30s` |
+
+Endpoints: `GET /v1/pcs/status`, `GET /v1/pcs/ais/status`,
+`GET /v1/pcs/ais/positions?mmsi=&limit=`, `GET /v1/pcs/tos/berths?port_code=`,
+`GET /v1/pcs/portcalls?imo=` (or `?mmsi=`, resolved through the validated AIS
+identity leg). AIS messages are schema-validated fail closed (MMSI structure,
+IMO check digit, WGS-84 coordinate envelope; absurd speed/course clamped to
+the AIS domain envelope), persisted idempotently on `(mmsi, message_ts)` in
+`pcs_ais_positions` (migration `0024`), and correlated with TOS berth
+assignments and NSW port calls by `internal/pcs/linkage`. A set-but-invalid
+configuration fails the boot.
+
 ## Current boundary
+
 
 This is an implemented local S1 + eCallUp foundation, not a complete Maritime
 Single Window. Remaining work includes the approved IMO/NSW message profile,

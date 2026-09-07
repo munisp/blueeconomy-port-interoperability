@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/imonumber"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
 
@@ -579,4 +580,39 @@ func ensureActiveAgencyProfile(ctx context.Context, tx pgx.Tx, profileID, versio
 		return ErrClearanceInvalid
 	}
 	return nil
+}
+
+// ListByIMO returns the newest port calls for a vessel IMO, newest first.
+// It is the NSW-side lookup used by the PCS port-call linkage join; like
+// every Store method it runs inside the tenant transaction so row-level
+// security scopes the result to the verified caller.
+func (store *Store) ListByIMO(ctx context.Context, imo string, limit int) ([]PortCall, error) {
+	if !imonumber.Valid(imo) {
+		return nil, fmt.Errorf("vessel_imo must be a seven-digit IMO number with a valid check digit")
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+	var calls []PortCall
+	err := store.WithTenantTx(ctx, func(tx pgx.Tx, _ tenantctx.Claims) error {
+		rows, err := tx.Query(ctx, `
+			SELECT call_id, vessel_imo, port_code, declaration_reference, submitted_by,
+				agency_profile_id, agency_profile_version, status, created_at, updated_at, version
+			FROM port_calls WHERE vessel_imo = $1
+			ORDER BY created_at DESC LIMIT $2`, imo, limit)
+		if err != nil {
+			return fmt.Errorf("list port calls by IMO: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var call PortCall
+			if err := rows.Scan(&call.CallID, &call.VesselIMO, &call.PortCode, &call.DeclarationRef, &call.SubmittedBy,
+				&call.AgencyProfileID, &call.AgencyProfileVersion, &call.Status, &call.CreatedAt, &call.UpdatedAt, &call.Version); err != nil {
+				return fmt.Errorf("scan port call: %w", err)
+			}
+			calls = append(calls, call)
+		}
+		return rows.Err()
+	})
+	return calls, err
 }
