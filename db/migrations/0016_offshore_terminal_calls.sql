@@ -7,18 +7,20 @@
 
 -- Widen the outbox topic contract for the new platform topics.
 ALTER TABLE platform_outbox DROP CONSTRAINT platform_outbox_topic_check;
-ALTER TABLE platform_outbox
-    ADD CONSTRAINT platform_outbox_topic_check
-    CHECK (topic IN (
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'platform_outbox_topic_check') THEN
+    ALTER TABLE platform_outbox ADD CONSTRAINT platform_outbox_topic_check CHECK (topic IN (
         'ports.booking.v1', 'ports.gate.v1', 'ports.queue.v1',
         'trade.declarations.v1', 'ports.offshore.v1', 'ports.manifests.v1',
         'ports.cruise.v1', 'finance.revenue-assessments.v1'
     ));
+  END IF;
+END $$;
 
 -- Versioned tariff schedules. A schedule is immutable once registered: rate
 -- changes are a new schedule_id with a new effectiveness window (the
 -- effective_from/effective_to pair is the temporal version dimension).
-CREATE TABLE tariff_schedules (
+CREATE TABLE IF NOT EXISTS tariff_schedules (
     schedule_id TEXT PRIMARY KEY CHECK (schedule_id ~ '^[A-Za-z0-9._:-]{2,64}$'),
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     domain TEXT NOT NULL CHECK (domain IN ('OFFSHORE_TERMINAL', 'CRUISE_DUES')),
@@ -32,12 +34,12 @@ CREATE TABLE tariff_schedules (
     active BOOLEAN NOT NULL DEFAULT true,
     CHECK (effective_to IS NULL OR effective_to > effective_from)
 );
-CREATE INDEX tariff_schedules_domain_window_idx ON tariff_schedules (domain, effective_from);
+CREATE INDEX IF NOT EXISTS tariff_schedules_domain_window_idx ON tariff_schedules (domain, effective_from);
 
 -- Individual rate rows. amount_minor is the charge in the schedule currency's
 -- minor units per unit of measure. PER_GT_BAND rows select the per-GT rate by
 -- gross-tonnage band (Sea Protection Levy style); band_max NULL is unbounded.
-CREATE TABLE tariff_rules (
+CREATE TABLE IF NOT EXISTS tariff_rules (
     rule_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     schedule_id TEXT NOT NULL REFERENCES tariff_schedules(schedule_id),
@@ -50,12 +52,12 @@ CREATE TABLE tariff_rules (
     CHECK (unit <> 'PER_GT_BAND' OR (band_max IS NULL OR band_max > band_min)),
     UNIQUE (schedule_id, component_code, band_min)
 );
-CREATE INDEX tariff_rules_schedule_idx ON tariff_rules (schedule_id, component_code);
+CREATE INDEX IF NOT EXISTS tariff_rules_schedule_idx ON tariff_rules (schedule_id, component_code);
 
 -- Offshore terminal calls: tanker calls at SBM/SPM/FPSO terminals that never
 -- touch a berth. The mooring-master workflow states run NOMINATED through
 -- DEPARTED; CANCELLED is the pre-mooring abort.
-CREATE TABLE offshore_terminal_calls (
+CREATE TABLE IF NOT EXISTS offshore_terminal_calls (
     call_id TEXT PRIMARY KEY CHECK (call_id ~ '^[A-Za-z0-9._:-]{2,64}$'),
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     idempotency_key TEXT NOT NULL UNIQUE,
@@ -83,12 +85,12 @@ CREATE TABLE offshore_terminal_calls (
     version BIGINT NOT NULL CHECK (version > 0),
     CHECK (mooring_window_end > mooring_window_start)
 );
-CREATE INDEX offshore_calls_tenant_terminal_idx ON offshore_terminal_calls (tenant_id, terminal_code, mooring_window_start);
+CREATE INDEX IF NOT EXISTS offshore_calls_tenant_terminal_idx ON offshore_terminal_calls (tenant_id, terminal_code, mooring_window_start);
 
 -- Append-only operational events: hose connection, loading-arm operations and
 -- custody-transfer metering readings. Metering rows carry opening/closing
 -- readings; the transferred volume is derived, never client-supplied.
-CREATE TABLE offshore_call_events (
+CREATE TABLE IF NOT EXISTS offshore_call_events (
     event_seq BIGSERIAL PRIMARY KEY,
     event_id UUID NOT NULL UNIQUE,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
@@ -112,12 +114,12 @@ CREATE TABLE offshore_call_events (
          meter_opening_m3 IS NULL AND meter_closing_m3 IS NULL)
     )
 );
-CREATE INDEX offshore_call_events_call_idx ON offshore_call_events (call_id, event_seq);
+CREATE INDEX IF NOT EXISTS offshore_call_events_call_idx ON offshore_call_events (call_id, event_seq);
 
 -- Revenue assessments: the deterministic Compute output pinned to a schedule
 -- version. idempotency_key makes every assessment mutation replay-safe; the
 -- outbox row is written in the same transaction (exactly-once emission).
-CREATE TABLE revenue_assessments (
+CREATE TABLE IF NOT EXISTS revenue_assessments (
     assessment_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     idempotency_key TEXT NOT NULL UNIQUE,
@@ -132,31 +134,46 @@ CREATE TABLE revenue_assessments (
     assessed_by TEXT NOT NULL CHECK (length(assessed_by) BETWEEN 2 AND 256),
     assessed_at TIMESTAMPTZ NOT NULL
 );
-CREATE INDEX revenue_assessments_call_idx ON revenue_assessments (domain, call_reference, assessed_at);
+CREATE INDEX IF NOT EXISTS revenue_assessments_call_idx ON revenue_assessments (domain, call_reference, assessed_at);
 
 -- Tenant isolation, matching migrations 0008/0009.
 ALTER TABLE tariff_schedules ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tariff_schedules FORCE ROW LEVEL SECURITY;
-CREATE POLICY tariff_schedules_tenant_policy ON tariff_schedules
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'tariff_schedules' AND policyname = 'tariff_schedules_tenant_policy') THEN
+    CREATE POLICY tariff_schedules_tenant_policy ON tariff_schedules USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 ALTER TABLE tariff_rules ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tariff_rules FORCE ROW LEVEL SECURITY;
-CREATE POLICY tariff_rules_tenant_policy ON tariff_rules
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'tariff_rules' AND policyname = 'tariff_rules_tenant_policy') THEN
+    CREATE POLICY tariff_rules_tenant_policy ON tariff_rules USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 ALTER TABLE offshore_terminal_calls ENABLE ROW LEVEL SECURITY;
 ALTER TABLE offshore_terminal_calls FORCE ROW LEVEL SECURITY;
-CREATE POLICY offshore_terminal_calls_tenant_policy ON offshore_terminal_calls
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'offshore_terminal_calls' AND policyname = 'offshore_terminal_calls_tenant_policy') THEN
+    CREATE POLICY offshore_terminal_calls_tenant_policy ON offshore_terminal_calls USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 ALTER TABLE offshore_call_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE offshore_call_events FORCE ROW LEVEL SECURITY;
-CREATE POLICY offshore_call_events_tenant_policy ON offshore_call_events
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'offshore_call_events' AND policyname = 'offshore_call_events_tenant_policy') THEN
+    CREATE POLICY offshore_call_events_tenant_policy ON offshore_call_events USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 ALTER TABLE revenue_assessments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE revenue_assessments FORCE ROW LEVEL SECURITY;
-CREATE POLICY revenue_assessments_tenant_policy ON revenue_assessments
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'revenue_assessments' AND policyname = 'revenue_assessments_tenant_policy') THEN
+    CREATE POLICY revenue_assessments_tenant_policy ON revenue_assessments USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;

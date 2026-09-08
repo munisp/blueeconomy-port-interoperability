@@ -1,4 +1,4 @@
-CREATE TABLE port_call_document_supersessions (
+CREATE TABLE IF NOT EXISTS port_call_document_supersessions (
     supersession_id UUID PRIMARY KEY,
     call_id TEXT NOT NULL REFERENCES port_calls(call_id),
     original_document_id UUID NOT NULL REFERENCES port_call_documents(document_id),
@@ -11,7 +11,7 @@ CREATE TABLE port_call_document_supersessions (
     CHECK (original_document_id <> replacement_document_id)
 );
 
-CREATE TABLE port_call_clearance_amendments (
+CREATE TABLE IF NOT EXISTS port_call_clearance_amendments (
     amendment_id UUID PRIMARY KEY,
     call_id TEXT NOT NULL REFERENCES port_calls(call_id),
     prior_decision_id UUID NOT NULL REFERENCES port_call_clearance_decisions(decision_id),
@@ -25,6 +25,10 @@ CREATE TABLE port_call_clearance_amendments (
 );
 
 ALTER TABLE port_call_outbox DROP CONSTRAINT IF EXISTS port_call_outbox_event_type_check;
-ALTER TABLE port_call_outbox ADD CONSTRAINT port_call_outbox_event_type_check CHECK (event_type IN (
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'port_call_outbox_event_type_check') THEN
+    ALTER TABLE port_call_outbox ADD CONSTRAINT port_call_outbox_event_type_check CHECK (event_type IN (
  'port_call.created','port_call.status_changed','port_call.document_declared','port_call.document_reviewed','port_call.clearance_decided','port_call.document_superseded','port_call.clearance_amended'
 ));
+  END IF;
+END $$;

@@ -9,7 +9,7 @@
 -- permit. Lifecycle events (registry.cabotage.v1) are JWS-signed into the
 -- shared platform_outbox in the same transaction as the mutation.
 
-CREATE TABLE registry_cabotage_rules (
+CREATE TABLE IF NOT EXISTS registry_cabotage_rules (
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     rule_id TEXT NOT NULL CHECK (length(rule_id) BETWEEN 1 AND 64),
     -- ISO 3166-1 alpha-2 flag state that a cabotage vessel must fly.
@@ -30,10 +30,10 @@ CREATE TABLE registry_cabotage_rules (
 );
 -- Exactly the latest ACTIVE rule row per tenant governs evaluation; the
 -- partial unique index guarantees at most one.
-CREATE UNIQUE INDEX registry_cabotage_rules_active_idx
+CREATE UNIQUE INDEX IF NOT EXISTS registry_cabotage_rules_active_idx
     ON registry_cabotage_rules (tenant_id) WHERE status = 'ACTIVE';
 
-CREATE TABLE registry_cabotage_permits (
+CREATE TABLE IF NOT EXISTS registry_cabotage_permits (
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     permit_id TEXT NOT NULL CHECK (length(permit_id) BETWEEN 1 AND 64),
     idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 256),
@@ -65,13 +65,13 @@ CREATE TABLE registry_cabotage_permits (
            OR (flag_criterion_met AND ownership_criterion_met AND build_criterion_met)
            OR waiver_reference IS NOT NULL)
 );
-CREATE INDEX registry_cabotage_permits_vessel_idx
+CREATE INDEX IF NOT EXISTS registry_cabotage_permits_vessel_idx
     ON registry_cabotage_permits (tenant_id, vessel_id);
 -- At most one open (APPLICATION/APPROVED) permit per vessel.
-CREATE UNIQUE INDEX registry_cabotage_permits_open_idx
+CREATE UNIQUE INDEX IF NOT EXISTS registry_cabotage_permits_open_idx
     ON registry_cabotage_permits (tenant_id, vessel_id) WHERE status IN ('APPLICATION', 'APPROVED');
 
-CREATE TABLE registry_cabotage_violations (
+CREATE TABLE IF NOT EXISTS registry_cabotage_violations (
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     violation_id TEXT NOT NULL CHECK (length(violation_id) BETWEEN 1 AND 64),
     vessel_id TEXT NOT NULL,
@@ -92,24 +92,33 @@ CREATE TABLE registry_cabotage_violations (
     FOREIGN KEY (tenant_id, permit_id) REFERENCES registry_cabotage_permits (tenant_id, permit_id),
     CHECK (status = 'OPEN' OR resolved_at IS NOT NULL)
 );
-CREATE INDEX registry_cabotage_violations_open_idx
+CREATE INDEX IF NOT EXISTS registry_cabotage_violations_open_idx
     ON registry_cabotage_violations (tenant_id, vessel_id) WHERE status = 'OPEN';
 
 -- Tenant isolation matching migration 0008.
 ALTER TABLE registry_cabotage_rules ENABLE ROW LEVEL SECURITY;
 ALTER TABLE registry_cabotage_rules FORCE ROW LEVEL SECURITY;
-CREATE POLICY registry_cabotage_rules_tenant_policy ON registry_cabotage_rules
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'registry_cabotage_rules' AND policyname = 'registry_cabotage_rules_tenant_policy') THEN
+    CREATE POLICY registry_cabotage_rules_tenant_policy ON registry_cabotage_rules USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 
 ALTER TABLE registry_cabotage_permits ENABLE ROW LEVEL SECURITY;
 ALTER TABLE registry_cabotage_permits FORCE ROW LEVEL SECURITY;
-CREATE POLICY registry_cabotage_permits_tenant_policy ON registry_cabotage_permits
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'registry_cabotage_permits' AND policyname = 'registry_cabotage_permits_tenant_policy') THEN
+    CREATE POLICY registry_cabotage_permits_tenant_policy ON registry_cabotage_permits USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 
 ALTER TABLE registry_cabotage_violations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE registry_cabotage_violations FORCE ROW LEVEL SECURITY;
-CREATE POLICY registry_cabotage_violations_tenant_policy ON registry_cabotage_violations
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'registry_cabotage_violations' AND policyname = 'registry_cabotage_violations_tenant_policy') THEN
+    CREATE POLICY registry_cabotage_violations_tenant_policy ON registry_cabotage_violations USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;

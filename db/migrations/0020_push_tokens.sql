@@ -8,7 +8,7 @@
 -- Scope: (tenant, user, device). actor identity is the verified
 -- OIDC/gateway subject — never a request-body user id.
 
-CREATE TABLE push_tokens (
+CREATE TABLE IF NOT EXISTS push_tokens (
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     user_id TEXT NOT NULL CHECK (length(user_id) BETWEEN 1 AND 256),
     device_id TEXT NOT NULL CHECK (length(device_id) BETWEEN 1 AND 256),
@@ -25,14 +25,17 @@ CREATE TABLE push_tokens (
 -- A provider token identifies one active installation: at most one ACTIVE
 -- row per (tenant, token). Re-registration moves the token, revoking the
 -- previous holder's row in the same transaction.
-CREATE UNIQUE INDEX push_tokens_active_token_idx
+CREATE UNIQUE INDEX IF NOT EXISTS push_tokens_active_token_idx
     ON push_tokens (tenant_id, token) WHERE status = 'ACTIVE';
-CREATE INDEX push_tokens_user_idx
+CREATE INDEX IF NOT EXISTS push_tokens_user_idx
     ON push_tokens (tenant_id, user_id) WHERE status = 'ACTIVE';
 
 -- Tenant isolation matching migration 0008.
 ALTER TABLE push_tokens ENABLE ROW LEVEL SECURITY;
 ALTER TABLE push_tokens FORCE ROW LEVEL SECURITY;
-CREATE POLICY push_tokens_tenant_policy ON push_tokens
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'push_tokens' AND policyname = 'push_tokens_tenant_policy') THEN
+    CREATE POLICY push_tokens_tenant_policy ON push_tokens USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;

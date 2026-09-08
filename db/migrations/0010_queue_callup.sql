@@ -5,9 +5,9 @@
 -- Per-terminal call-up capacity: at most this many queue requests may hold
 -- CALLED_UP/EN_ROUTE at once. Enforced by trigger below.
 ALTER TABLE port_terminals
-    ADD COLUMN queue_capacity INTEGER NOT NULL DEFAULT 1 CHECK (queue_capacity > 0);
+    ADD COLUMN IF NOT EXISTS queue_capacity INTEGER NOT NULL DEFAULT 1 CHECK (queue_capacity > 0);
 
-CREATE TABLE truck_queue_requests (
+CREATE TABLE IF NOT EXISTS truck_queue_requests (
     queue_request_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 8 AND 128),
@@ -37,16 +37,16 @@ CREATE TABLE truck_queue_requests (
 );
 -- One winner per terminal position: the position sequence is assigned under
 -- the terminal row lock and this index rejects any duplicate that survives.
-CREATE UNIQUE INDEX truck_queue_position_idx ON truck_queue_requests (terminal_id, position) WHERE position IS NOT NULL;
-CREATE INDEX truck_queue_terminal_idx ON truck_queue_requests (terminal_id, status, position) WHERE status IN ('QUEUED', 'CALLED_UP', 'EN_ROUTE');
-CREATE INDEX truck_queue_booking_idx ON truck_queue_requests (booking_id) WHERE booking_id IS NOT NULL;
-CREATE INDEX truck_queue_grace_idx ON truck_queue_requests (grace_deadline) WHERE status IN ('CALLED_UP', 'EN_ROUTE');
+CREATE UNIQUE INDEX IF NOT EXISTS truck_queue_position_idx ON truck_queue_requests (terminal_id, position) WHERE position IS NOT NULL;
+CREATE INDEX IF NOT EXISTS truck_queue_terminal_idx ON truck_queue_requests (terminal_id, status, position) WHERE status IN ('QUEUED', 'CALLED_UP', 'EN_ROUTE');
+CREATE INDEX IF NOT EXISTS truck_queue_booking_idx ON truck_queue_requests (booking_id) WHERE booking_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS truck_queue_grace_idx ON truck_queue_requests (grace_deadline) WHERE status IN ('CALLED_UP', 'EN_ROUTE');
 
 -- DB-enforced call-up capacity: a queue request may only hold CALLED_UP or
 -- EN_ROUTE while the terminal has remaining call-up capacity. The trigger
 -- re-counts under the terminal row lock taken by the promoting transaction,
 -- so concurrent promotions can never exceed queue_capacity.
-CREATE FUNCTION enforce_terminal_callup_capacity() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION enforce_terminal_callup_capacity() RETURNS trigger AS $$
 DECLARE
     terminal_capacity INTEGER;
     active_count INTEGER;
@@ -70,6 +70,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS truck_queue_callup_capacity_guard ON truck_queue_requests;
 CREATE TRIGGER truck_queue_callup_capacity_guard
     BEFORE INSERT OR UPDATE OF status ON truck_queue_requests
     FOR EACH ROW EXECUTE FUNCTION enforce_terminal_callup_capacity();
@@ -77,12 +78,18 @@ CREATE TRIGGER truck_queue_callup_capacity_guard
 -- The queue lifecycle publishes ports.queue.v1 envelopes through the same
 -- transactional outbox as booking and gate events.
 ALTER TABLE platform_outbox DROP CONSTRAINT platform_outbox_topic_check;
-ALTER TABLE platform_outbox
-    ADD CONSTRAINT platform_outbox_topic_check CHECK (topic IN ('ports.booking.v1', 'ports.gate.v1', 'ports.queue.v1'));
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'platform_outbox_topic_check') THEN
+    ALTER TABLE platform_outbox ADD CONSTRAINT platform_outbox_topic_check CHECK (topic IN ('ports.booking.v1', 'ports.gate.v1', 'ports.queue.v1'));
+  END IF;
+END $$;
 
 -- Tenant isolation matching migration 0008/0009.
 ALTER TABLE truck_queue_requests ENABLE ROW LEVEL SECURITY;
 ALTER TABLE truck_queue_requests FORCE ROW LEVEL SECURITY;
-CREATE POLICY truck_queue_requests_tenant_policy ON truck_queue_requests
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'truck_queue_requests' AND policyname = 'truck_queue_requests_tenant_policy') THEN
+    CREATE POLICY truck_queue_requests_tenant_policy ON truck_queue_requests USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;

@@ -5,32 +5,38 @@
 -- A booking may reference a Nigeria Customs cargo declaration; when it does,
 -- the declared weight, consignee and operator identities are mandatory so the
 -- customs validator can cross-check them.
-ALTER TABLE truck_bookings ADD COLUMN cargo_declaration_ref TEXT;
-ALTER TABLE truck_bookings ADD COLUMN declared_weight_kg BIGINT;
-ALTER TABLE truck_bookings ADD COLUMN consignee_id TEXT;
-ALTER TABLE truck_bookings ADD COLUMN operator_id TEXT;
-ALTER TABLE truck_bookings
-    ADD CONSTRAINT truck_bookings_declaration_ref_check
-    CHECK (cargo_declaration_ref IS NULL OR cargo_declaration_ref ~ '^[A-Z0-9][A-Z0-9/-]{3,63}$');
-ALTER TABLE truck_bookings
-    ADD CONSTRAINT truck_bookings_declaration_complete_check
-    CHECK (cargo_declaration_ref IS NULL OR (
+ALTER TABLE truck_bookings ADD COLUMN IF NOT EXISTS cargo_declaration_ref TEXT;
+ALTER TABLE truck_bookings ADD COLUMN IF NOT EXISTS declared_weight_kg BIGINT;
+ALTER TABLE truck_bookings ADD COLUMN IF NOT EXISTS consignee_id TEXT;
+ALTER TABLE truck_bookings ADD COLUMN IF NOT EXISTS operator_id TEXT;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'truck_bookings_declaration_ref_check') THEN
+    ALTER TABLE truck_bookings ADD CONSTRAINT truck_bookings_declaration_ref_check CHECK (cargo_declaration_ref IS NULL OR cargo_declaration_ref ~ '^[A-Z0-9][A-Z0-9/-]{3,63}$');
+  END IF;
+END $$;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'truck_bookings_declaration_complete_check') THEN
+    ALTER TABLE truck_bookings ADD CONSTRAINT truck_bookings_declaration_complete_check CHECK (cargo_declaration_ref IS NULL OR (
         declared_weight_kg IS NOT NULL AND declared_weight_kg > 0 AND
         consignee_id IS NOT NULL AND length(consignee_id) BETWEEN 2 AND 128 AND
         operator_id IS NOT NULL AND length(operator_id) BETWEEN 2 AND 128
     ));
+  END IF;
+END $$;
 
 -- Customs gate states: VALIDATION_PENDING holds the booking (and its slot
 -- capacity) while the declaration cross-check runs; REJECTED is the
 -- fail-closed mismatch outcome.
 ALTER TABLE truck_bookings DROP CONSTRAINT truck_bookings_status_check;
-ALTER TABLE truck_bookings
-    ADD CONSTRAINT truck_bookings_status_check
-    CHECK (status IN (
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'truck_bookings_status_check') THEN
+    ALTER TABLE truck_bookings ADD CONSTRAINT truck_bookings_status_check CHECK (status IN (
         'DRAFTED', 'PENDING_SYNC', 'SLOT_RESERVED', 'PAID', 'VALIDATION_PENDING',
         'GATE_APPROVED', 'COMPLETED', 'CANCELLED', 'EXPIRED', 'REJECTED',
         'RECONCILIATION_REQUIRED'
     ));
+  END IF;
+END $$;
 
 -- VALIDATION_PENDING still occupies terminal slot capacity: the booking is
 -- paused, not released. Replace the guard to keep no-overbooking airtight.
@@ -61,7 +67,7 @@ $$ LANGUAGE plpgsql;
 -- Append-only record of every Nigeria Customs cross-validation decision. A
 -- MISMATCH row is the evidence trail behind a REJECTED booking; a MATCH row
 -- is the gate-approval prerequisite for declaration-carrying bookings.
-CREATE TABLE customs_validations (
+CREATE TABLE IF NOT EXISTS customs_validations (
     validation_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     booking_id UUID NOT NULL REFERENCES truck_bookings(booking_id),
@@ -77,18 +83,21 @@ CREATE TABLE customs_validations (
     validated_at TIMESTAMPTZ NOT NULL,
     CHECK ((decision = 'MATCH' AND reason_code = '') OR (decision = 'MISMATCH' AND reason_code <> ''))
 );
-CREATE INDEX customs_validations_booking_idx ON customs_validations (booking_id, validated_at);
+CREATE INDEX IF NOT EXISTS customs_validations_booking_idx ON customs_validations (booking_id, validated_at);
 
 ALTER TABLE customs_validations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE customs_validations FORCE ROW LEVEL SECURITY;
-CREATE POLICY customs_validations_tenant_policy ON customs_validations
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'customs_validations' AND policyname = 'customs_validations_tenant_policy') THEN
+    CREATE POLICY customs_validations_tenant_policy ON customs_validations USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 
 -- NSW outbound delivery ledger: every NSW-relevant outbox event is handed to
 -- the NSW operator endpoint at-least-once. Rows move PENDING -> DELIVERED or
 -- PENDING -> FAILED_PERMANENT after max_attempts; nothing is silently dropped.
-CREATE TABLE nsw_delivery (
+CREATE TABLE IF NOT EXISTS nsw_delivery (
     delivery_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     source TEXT NOT NULL CHECK (source IN ('platform_outbox', 'port_call_outbox')),
@@ -109,10 +118,13 @@ CREATE TABLE nsw_delivery (
     UNIQUE (source, event_id),
     CHECK (status <> 'DELIVERED' OR delivered_at IS NOT NULL)
 );
-CREATE INDEX nsw_delivery_due_idx ON nsw_delivery (next_attempt_at) WHERE status = 'PENDING';
+CREATE INDEX IF NOT EXISTS nsw_delivery_due_idx ON nsw_delivery (next_attempt_at) WHERE status = 'PENDING';
 
 ALTER TABLE nsw_delivery ENABLE ROW LEVEL SECURITY;
 ALTER TABLE nsw_delivery FORCE ROW LEVEL SECURITY;
-CREATE POLICY nsw_delivery_tenant_policy ON nsw_delivery
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'nsw_delivery' AND policyname = 'nsw_delivery_tenant_policy') THEN
+    CREATE POLICY nsw_delivery_tenant_policy ON nsw_delivery USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;

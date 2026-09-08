@@ -11,7 +11,7 @@
 -- B/L release-authority registry: only the shipping line recorded here may
 -- open a chain for the container/B-L pair. The digest is the SHA-256 (hex)
 -- of the carrier manifest record; the plaintext B/L never leaves the line.
-CREATE TABLE secure_chain_bl_registry (
+CREATE TABLE IF NOT EXISTS secure_chain_bl_registry (
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     bl_digest TEXT NOT NULL CHECK (bl_digest ~ '^[0-9a-f]{64}$'),
     container_id TEXT NOT NULL CHECK (container_id ~ '^[A-Z]{4}[0-9]{7}$'),
@@ -20,7 +20,7 @@ CREATE TABLE secure_chain_bl_registry (
     PRIMARY KEY (tenant_id, bl_digest)
 );
 
-CREATE TABLE secure_chains (
+CREATE TABLE IF NOT EXISTS secure_chains (
     chain_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 8 AND 128),
@@ -43,15 +43,15 @@ CREATE TABLE secure_chains (
 );
 -- One ACTIVE chain per container per tenant: a container can never have two
 -- competing release chains.
-CREATE UNIQUE INDEX secure_chains_active_container_idx
+CREATE UNIQUE INDEX IF NOT EXISTS secure_chains_active_container_idx
     ON secure_chains (tenant_id, container_id) WHERE status = 'ACTIVE';
-CREATE INDEX secure_chains_expiry_idx ON secure_chains (expires_at) WHERE status = 'ACTIVE';
+CREATE INDEX IF NOT EXISTS secure_chains_expiry_idx ON secure_chains (expires_at) WHERE status = 'ACTIVE';
 
 -- Chain links are append-only and hash-chained:
 -- link_hash = sha256(prev_link_hash || JCS(link identity fields)). seq and
 -- prev_hash are checked by trigger against the previous link, so a forked
 -- or rewritten history is rejected by the database itself.
-CREATE TABLE secure_chain_links (
+CREATE TABLE IF NOT EXISTS secure_chain_links (
     chain_id UUID NOT NULL REFERENCES secure_chains(chain_id),
     seq BIGINT NOT NULL CHECK (seq > 0),
     from_org TEXT NOT NULL CHECK (length(from_org) BETWEEN 2 AND 128),
@@ -73,14 +73,14 @@ CREATE TABLE secure_chain_links (
 -- Single-active-tail invariant, part 1: at most one unresolved (PENDING)
 -- link per chain. A new nomination is impossible until the open nomination
 -- is accepted, declined or revoked.
-CREATE UNIQUE INDEX secure_chain_links_pending_idx ON secure_chain_links (chain_id)
+CREATE UNIQUE INDEX IF NOT EXISTS secure_chain_links_pending_idx ON secure_chain_links (chain_id)
     WHERE accepted_at IS NULL AND declined_at IS NULL AND revoked_at IS NULL;
 
 -- Single-active-tail invariant, part 2: a link may only be appended by the
 -- current tail holder. The tail is the issuer for seq 1; afterwards it is
 -- the accepted nominee, or the nominator when the open nomination was
 -- declined. The trigger also pins seq/prev_hash to the hash chain.
-CREATE FUNCTION secure_chain_link_guard() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION secure_chain_link_guard() RETURNS trigger AS $$
 DECLARE
     chain_record secure_chains%ROWTYPE;
     previous secure_chain_links%ROWTYPE;
@@ -163,6 +163,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS secure_chain_links_guard ON secure_chain_links;
 CREATE TRIGGER secure_chain_links_guard
     BEFORE INSERT OR UPDATE OR DELETE ON secure_chain_links
     FOR EACH ROW EXECUTE FUNCTION secure_chain_link_guard();
@@ -170,7 +171,7 @@ CREATE TRIGGER secure_chain_links_guard
 -- Short-TTL single-use release authorization tokens. The nonce is a random
 -- 256-bit hex value; consumption is an atomic UPDATE guarded by
 -- consumed_at IS NULL, so replay is rejected by the database.
-CREATE TABLE secure_chain_tokens (
+CREATE TABLE IF NOT EXISTS secure_chain_tokens (
     nonce TEXT PRIMARY KEY CHECK (nonce ~ '^[0-9a-f]{64}$'),
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     chain_id UUID NOT NULL REFERENCES secure_chains(chain_id),
@@ -184,11 +185,11 @@ CREATE TABLE secure_chain_tokens (
     CHECK (expires_at > issued_at),
     CHECK (consumed_at IS NULL OR consumed_gate IS NOT NULL)
 );
-CREATE INDEX secure_chain_tokens_chain_idx ON secure_chain_tokens (chain_id);
+CREATE INDEX IF NOT EXISTS secure_chain_tokens_chain_idx ON secure_chain_tokens (chain_id);
 
 -- Hash-chained append-only audit ledger for every secure-chain event:
 -- entry_hash = sha256(prev_entry_hash || canonical event payload).
-CREATE TABLE secure_chain_audit (
+CREATE TABLE IF NOT EXISTS secure_chain_audit (
     audit_seq BIGSERIAL PRIMARY KEY,
     tenant_id TEXT NOT NULL,
     chain_id UUID NOT NULL REFERENCES secure_chains(chain_id),
@@ -198,9 +199,9 @@ CREATE TABLE secure_chain_audit (
     entry_hash TEXT NOT NULL CHECK (entry_hash ~ '^[0-9a-f]{64}$'),
     created_at TIMESTAMPTZ NOT NULL
 );
-CREATE INDEX secure_chain_audit_chain_idx ON secure_chain_audit (chain_id, audit_seq);
+CREATE INDEX IF NOT EXISTS secure_chain_audit_chain_idx ON secure_chain_audit (chain_id, audit_seq);
 
-CREATE FUNCTION secure_chain_audit_guard() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION secure_chain_audit_guard() RETURNS trigger AS $$
 DECLARE
     previous_hash TEXT;
 BEGIN
@@ -219,6 +220,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS secure_chain_audit_guard ON secure_chain_audit;
 CREATE TRIGGER secure_chain_audit_guard
     BEFORE INSERT OR UPDATE OR DELETE ON secure_chain_audit
     FOR EACH ROW EXECUTE FUNCTION secure_chain_audit_guard();
@@ -227,47 +229,64 @@ CREATE TRIGGER secure_chain_audit_guard
 -- bookings are gated on the secure-chain tail-holder check in the booking
 -- store (fail-closed when the verifier is unwired).
 ALTER TABLE truck_bookings
-    ADD COLUMN container_id TEXT CHECK (container_id IS NULL OR container_id ~ '^[A-Z]{4}[0-9]{7}$');
-CREATE INDEX truck_bookings_container_idx ON truck_bookings (container_id) WHERE container_id IS NOT NULL;
+    ADD COLUMN IF NOT EXISTS container_id TEXT CHECK (container_id IS NULL OR container_id ~ '^[A-Z]{4}[0-9]{7}$');
+CREATE INDEX IF NOT EXISTS truck_bookings_container_idx ON truck_bookings (container_id) WHERE container_id IS NOT NULL;
 
 -- The secure-chain lifecycle publishes ports.securechain.v1 envelopes
 -- through the same transactional outbox as booking, gate and queue events.
 ALTER TABLE platform_outbox DROP CONSTRAINT platform_outbox_topic_check;
-ALTER TABLE platform_outbox
-    ADD CONSTRAINT platform_outbox_topic_check
-    CHECK (topic IN (
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'platform_outbox_topic_check') THEN
+    ALTER TABLE platform_outbox ADD CONSTRAINT platform_outbox_topic_check CHECK (topic IN (
         'ports.booking.v1', 'ports.gate.v1', 'ports.queue.v1',
         'trade.declarations.v1', 'ports.offshore.v1', 'ports.manifests.v1',
         'ports.cruise.v1', 'finance.revenue-assessments.v1',
         'ports.securechain.v1'
     ));
+  END IF;
+END $$;
 
 -- Tenant isolation matching migration 0008.
 ALTER TABLE secure_chain_bl_registry ENABLE ROW LEVEL SECURITY;
 ALTER TABLE secure_chain_bl_registry FORCE ROW LEVEL SECURITY;
-CREATE POLICY secure_chain_bl_registry_tenant_policy ON secure_chain_bl_registry
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'secure_chain_bl_registry' AND policyname = 'secure_chain_bl_registry_tenant_policy') THEN
+    CREATE POLICY secure_chain_bl_registry_tenant_policy ON secure_chain_bl_registry USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 
 ALTER TABLE secure_chains ENABLE ROW LEVEL SECURITY;
 ALTER TABLE secure_chains FORCE ROW LEVEL SECURITY;
-CREATE POLICY secure_chains_tenant_policy ON secure_chains
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'secure_chains' AND policyname = 'secure_chains_tenant_policy') THEN
+    CREATE POLICY secure_chains_tenant_policy ON secure_chains USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 
 ALTER TABLE secure_chain_links ENABLE ROW LEVEL SECURITY;
 ALTER TABLE secure_chain_links FORCE ROW LEVEL SECURITY;
-CREATE POLICY secure_chain_links_tenant_policy ON secure_chain_links
-    USING (chain_id IN (SELECT chain_id FROM secure_chains));
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'secure_chain_links' AND policyname = 'secure_chain_links_tenant_policy') THEN
+    CREATE POLICY secure_chain_links_tenant_policy ON secure_chain_links USING (chain_id IN (SELECT chain_id FROM secure_chains));
+  END IF;
+END $$;
 
 ALTER TABLE secure_chain_tokens ENABLE ROW LEVEL SECURITY;
 ALTER TABLE secure_chain_tokens FORCE ROW LEVEL SECURITY;
-CREATE POLICY secure_chain_tokens_tenant_policy ON secure_chain_tokens
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'secure_chain_tokens' AND policyname = 'secure_chain_tokens_tenant_policy') THEN
+    CREATE POLICY secure_chain_tokens_tenant_policy ON secure_chain_tokens USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 
 ALTER TABLE secure_chain_audit ENABLE ROW LEVEL SECURITY;
 ALTER TABLE secure_chain_audit FORCE ROW LEVEL SECURITY;
-CREATE POLICY secure_chain_audit_tenant_policy ON secure_chain_audit
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'secure_chain_audit' AND policyname = 'secure_chain_audit_tenant_policy') THEN
+    CREATE POLICY secure_chain_audit_tenant_policy ON secure_chain_audit USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
