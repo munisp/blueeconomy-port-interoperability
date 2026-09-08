@@ -1,6 +1,6 @@
 -- eCallUp 2.0 truck booking: per-truck slot booking, payment, gate control,
 -- offline sync, platform outbox and NSW ingress replay protection.
-CREATE TABLE port_terminals (
+CREATE TABLE IF NOT EXISTS port_terminals (
     terminal_id TEXT PRIMARY KEY CHECK (terminal_id ~ '^[A-Z][A-Z0-9-]{1,31}$'),
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     port_code TEXT NOT NULL CHECK (port_code ~ '^[A-Z]{2,8}$'),
@@ -10,7 +10,7 @@ CREATE TABLE port_terminals (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE terminal_slots (
+CREATE TABLE IF NOT EXISTS terminal_slots (
     slot_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     terminal_id TEXT NOT NULL REFERENCES port_terminals(terminal_id),
@@ -21,9 +21,9 @@ CREATE TABLE terminal_slots (
     CHECK (ends_at > starts_at),
     UNIQUE (tenant_id, terminal_id, starts_at)
 );
-CREATE INDEX terminal_slots_window_idx ON terminal_slots (terminal_id, starts_at, ends_at);
+CREATE INDEX IF NOT EXISTS terminal_slots_window_idx ON terminal_slots (terminal_id, starts_at, ends_at);
 
-CREATE TABLE truck_bookings (
+CREATE TABLE IF NOT EXISTS truck_bookings (
     booking_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     request_id TEXT NOT NULL CHECK (length(request_id) BETWEEN 8 AND 128),
@@ -48,13 +48,13 @@ CREATE TABLE truck_bookings (
     version BIGINT NOT NULL CHECK (version > 0),
     UNIQUE (tenant_id, request_id)
 );
-CREATE INDEX truck_bookings_slot_idx ON truck_bookings (slot_id) WHERE slot_id IS NOT NULL;
-CREATE INDEX truck_bookings_plate_idx ON truck_bookings (tenant_id, truck_plate);
+CREATE INDEX IF NOT EXISTS truck_bookings_slot_idx ON truck_bookings (slot_id) WHERE slot_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS truck_bookings_plate_idx ON truck_bookings (tenant_id, truck_plate);
 
 -- DB-enforced no-overbooking: a booking may only hold a slot while it occupies
 -- an active state; the trigger re-counts under the slot row lock taken by the
 -- reserving transaction, so concurrent reservations cannot exceed capacity.
-CREATE FUNCTION enforce_slot_capacity() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION enforce_slot_capacity() RETURNS trigger AS $$
 DECLARE
     slot_capacity INTEGER;
     active_count INTEGER;
@@ -78,11 +78,12 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS truck_bookings_capacity_guard ON truck_bookings;
 CREATE TRIGGER truck_bookings_capacity_guard
     BEFORE INSERT OR UPDATE OF slot_id, status ON truck_bookings
     FOR EACH ROW EXECUTE FUNCTION enforce_slot_capacity();
 
-CREATE TABLE booking_payment_intents (
+CREATE TABLE IF NOT EXISTS booking_payment_intents (
     intent_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     booking_id UUID NOT NULL REFERENCES truck_bookings(booking_id),
@@ -95,7 +96,7 @@ CREATE TABLE booking_payment_intents (
     UNIQUE (tenant_id, request_id)
 );
 
-CREATE TABLE gate_scans (
+CREATE TABLE IF NOT EXISTS gate_scans (
     scan_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     booking_id UUID NOT NULL REFERENCES truck_bookings(booking_id),
@@ -105,11 +106,11 @@ CREATE TABLE gate_scans (
     denial_reason TEXT,
     scanned_at TIMESTAMPTZ NOT NULL
 );
-CREATE INDEX gate_scans_booking_idx ON gate_scans (booking_id, scanned_at);
+CREATE INDEX IF NOT EXISTS gate_scans_booking_idx ON gate_scans (booking_id, scanned_at);
 
 -- Platform outbox for ports.booking.v1 / ports.gate.v1 envelopes. Published
 -- at-least-once by the outbox publisher; event_id is the Kafka idempotence key.
-CREATE TABLE platform_outbox (
+CREATE TABLE IF NOT EXISTS platform_outbox (
     event_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     topic TEXT NOT NULL CHECK (topic IN ('ports.booking.v1', 'ports.gate.v1')),
@@ -120,38 +121,53 @@ CREATE TABLE platform_outbox (
     published_at TIMESTAMPTZ,
     UNIQUE (topic, idempotency_key)
 );
-CREATE INDEX platform_outbox_unpublished_idx ON platform_outbox (created_at) WHERE published_at IS NULL;
+CREATE INDEX IF NOT EXISTS platform_outbox_unpublished_idx ON platform_outbox (created_at) WHERE published_at IS NULL;
 
 -- NSW authority ingress replay protection (see internal/nswsecurity).
-CREATE TABLE nsw_ingress_replay (
+CREATE TABLE IF NOT EXISTS nsw_ingress_replay (
     replay_hash TEXT PRIMARY KEY,
     expires_at TIMESTAMPTZ NOT NULL
 );
-CREATE INDEX nsw_ingress_replay_expiry_idx ON nsw_ingress_replay (expires_at);
+CREATE INDEX IF NOT EXISTS nsw_ingress_replay_expiry_idx ON nsw_ingress_replay (expires_at);
 
 -- Tenant isolation for the new business tables, matching migration 0008.
 ALTER TABLE port_terminals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE port_terminals FORCE ROW LEVEL SECURITY;
-CREATE POLICY port_terminals_tenant_policy ON port_terminals
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'port_terminals' AND policyname = 'port_terminals_tenant_policy') THEN
+    CREATE POLICY port_terminals_tenant_policy ON port_terminals USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 ALTER TABLE terminal_slots ENABLE ROW LEVEL SECURITY;
 ALTER TABLE terminal_slots FORCE ROW LEVEL SECURITY;
-CREATE POLICY terminal_slots_tenant_policy ON terminal_slots
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'terminal_slots' AND policyname = 'terminal_slots_tenant_policy') THEN
+    CREATE POLICY terminal_slots_tenant_policy ON terminal_slots USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 ALTER TABLE truck_bookings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE truck_bookings FORCE ROW LEVEL SECURITY;
-CREATE POLICY truck_bookings_tenant_policy ON truck_bookings
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'truck_bookings' AND policyname = 'truck_bookings_tenant_policy') THEN
+    CREATE POLICY truck_bookings_tenant_policy ON truck_bookings USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 ALTER TABLE booking_payment_intents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE booking_payment_intents FORCE ROW LEVEL SECURITY;
-CREATE POLICY booking_payment_intents_tenant_policy ON booking_payment_intents
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'booking_payment_intents' AND policyname = 'booking_payment_intents_tenant_policy') THEN
+    CREATE POLICY booking_payment_intents_tenant_policy ON booking_payment_intents USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 ALTER TABLE gate_scans ENABLE ROW LEVEL SECURITY;
 ALTER TABLE gate_scans FORCE ROW LEVEL SECURITY;
-CREATE POLICY gate_scans_tenant_policy ON gate_scans
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'gate_scans' AND policyname = 'gate_scans_tenant_policy') THEN
+    CREATE POLICY gate_scans_tenant_policy ON gate_scans USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;

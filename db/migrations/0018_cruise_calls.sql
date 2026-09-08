@@ -4,7 +4,7 @@
 -- versioned CRUISE_DUES tariff schedule — the NPA US$10/head passenger
 -- charge class) and terminal/berth allocation for cruise tenders.
 
-CREATE TABLE cruise_calls (
+CREATE TABLE IF NOT EXISTS cruise_calls (
     call_id TEXT PRIMARY KEY CHECK (call_id ~ '^[A-Za-z0-9._:-]{2,64}$'),
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     idempotency_key TEXT NOT NULL UNIQUE,
@@ -20,10 +20,10 @@ CREATE TABLE cruise_calls (
     updated_at TIMESTAMPTZ NOT NULL,
     version BIGINT NOT NULL CHECK (version > 0)
 );
-CREATE INDEX cruise_calls_tenant_port_call_idx ON cruise_calls (tenant_id, port_call_id);
+CREATE INDEX IF NOT EXISTS cruise_calls_tenant_port_call_idx ON cruise_calls (tenant_id, port_call_id);
 
 -- Excursion manifests attached to a cruise call.
-CREATE TABLE cruise_excursions (
+CREATE TABLE IF NOT EXISTS cruise_excursions (
     excursion_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     call_id TEXT NOT NULL REFERENCES cruise_calls(call_id),
@@ -35,13 +35,13 @@ CREATE TABLE cruise_excursions (
     registered_by TEXT NOT NULL CHECK (length(registered_by) BETWEEN 2 AND 256),
     registered_at TIMESTAMPTZ NOT NULL
 );
-CREATE INDEX cruise_excursions_call_idx ON cruise_excursions (tenant_id, call_id);
+CREATE INDEX IF NOT EXISTS cruise_excursions_call_idx ON cruise_excursions (tenant_id, call_id);
 
 -- Tender terminal/berth allocation windows for cruise calls whose
 -- passengers come ashore by tender. btree_gist backs the no-overlap
 -- exclusion constraint on text equality members.
 CREATE EXTENSION IF NOT EXISTS btree_gist;
-CREATE TABLE cruise_tender_allocations (
+CREATE TABLE IF NOT EXISTS cruise_tender_allocations (
     allocation_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     call_id TEXT NOT NULL REFERENCES cruise_calls(call_id),
@@ -60,21 +60,30 @@ CREATE TABLE cruise_tender_allocations (
         tstzrange(window_start, window_end) WITH &&
     )
 );
-CREATE INDEX cruise_tender_allocations_call_idx ON cruise_tender_allocations (tenant_id, call_id);
+CREATE INDEX IF NOT EXISTS cruise_tender_allocations_call_idx ON cruise_tender_allocations (tenant_id, call_id);
 
 -- Tenant isolation, matching migrations 0008/0009.
 ALTER TABLE cruise_calls ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cruise_calls FORCE ROW LEVEL SECURITY;
-CREATE POLICY cruise_calls_tenant_policy ON cruise_calls
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'cruise_calls' AND policyname = 'cruise_calls_tenant_policy') THEN
+    CREATE POLICY cruise_calls_tenant_policy ON cruise_calls USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 ALTER TABLE cruise_excursions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cruise_excursions FORCE ROW LEVEL SECURITY;
-CREATE POLICY cruise_excursions_tenant_policy ON cruise_excursions
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'cruise_excursions' AND policyname = 'cruise_excursions_tenant_policy') THEN
+    CREATE POLICY cruise_excursions_tenant_policy ON cruise_excursions USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 ALTER TABLE cruise_tender_allocations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cruise_tender_allocations FORCE ROW LEVEL SECURITY;
-CREATE POLICY cruise_tender_allocations_tenant_policy ON cruise_tender_allocations
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'cruise_tender_allocations' AND policyname = 'cruise_tender_allocations_tenant_policy') THEN
+    CREATE POLICY cruise_tender_allocations_tenant_policy ON cruise_tender_allocations USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;

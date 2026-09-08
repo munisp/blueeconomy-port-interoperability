@@ -8,7 +8,7 @@
 --   SUBMITTED -> SCORING_UNAVAILABLE (terminal: fail-closed scorer outage)
 --   any pre-terminal version -> SUPERSEDED (amendment writes a new DRAFT
 --   revision row under the same declaration_ref)
-CREATE TABLE customs_declarations (
+CREATE TABLE IF NOT EXISTS customs_declarations (
     declaration_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     request_id TEXT NOT NULL CHECK (length(request_id) BETWEEN 8 AND 128),
@@ -62,22 +62,25 @@ CREATE TABLE customs_declarations (
     CHECK (status <> 'SUBMITTED' OR submitted_at IS NOT NULL)
 );
 -- At most one live (non-superseded) revision per declaration ref.
-CREATE UNIQUE INDEX customs_declarations_live_ref_idx
+CREATE UNIQUE INDEX IF NOT EXISTS customs_declarations_live_ref_idx
     ON customs_declarations (tenant_id, declaration_ref) WHERE status <> 'SUPERSEDED';
-CREATE INDEX customs_declarations_trader_idx ON customs_declarations (tenant_id, trader_id, status);
-CREATE INDEX customs_declarations_status_idx ON customs_declarations (tenant_id, status);
+CREATE INDEX IF NOT EXISTS customs_declarations_trader_idx ON customs_declarations (tenant_id, trader_id, status);
+CREATE INDEX IF NOT EXISTS customs_declarations_status_idx ON customs_declarations (tenant_id, status);
 
 ALTER TABLE customs_declarations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE customs_declarations FORCE ROW LEVEL SECURITY;
-CREATE POLICY customs_declarations_tenant_policy ON customs_declarations
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'customs_declarations' AND policyname = 'customs_declarations_tenant_policy') THEN
+    CREATE POLICY customs_declarations_tenant_policy ON customs_declarations USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 
 -- OGA (Other Government Agency) permits routed against a declaration. Model
 -- port of the singlewindow oga_permits table: multi-agency permit records
 -- with SLA deadlines; declaration submission is blocked while a linked
 -- permit is not APPROVED or is expired.
-CREATE TABLE declaration_permits (
+CREATE TABLE IF NOT EXISTS declaration_permits (
     permit_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     declaration_id UUID NOT NULL REFERENCES customs_declarations(declaration_id),
@@ -93,16 +96,19 @@ CREATE TABLE declaration_permits (
     updated_at TIMESTAMPTZ NOT NULL,
     UNIQUE (tenant_id, declaration_id, agency_code, permit_type)
 );
-CREATE INDEX declaration_permits_declaration_idx ON declaration_permits (declaration_id, status);
+CREATE INDEX IF NOT EXISTS declaration_permits_declaration_idx ON declaration_permits (declaration_id, status);
 
 ALTER TABLE declaration_permits ENABLE ROW LEVEL SECURITY;
 ALTER TABLE declaration_permits FORCE ROW LEVEL SECURITY;
-CREATE POLICY declaration_permits_tenant_policy ON declaration_permits
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'declaration_permits' AND policyname = 'declaration_permits_tenant_policy') THEN
+    CREATE POLICY declaration_permits_tenant_policy ON declaration_permits USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 
 -- Clearance certificates, issued atomically with the CLEARED transition.
-CREATE TABLE declaration_clearance_certificates (
+CREATE TABLE IF NOT EXISTS declaration_clearance_certificates (
     certificate_id UUID PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     declaration_id UUID NOT NULL UNIQUE REFERENCES customs_declarations(declaration_id),
@@ -115,13 +121,18 @@ CREATE TABLE declaration_clearance_certificates (
 
 ALTER TABLE declaration_clearance_certificates ENABLE ROW LEVEL SECURITY;
 ALTER TABLE declaration_clearance_certificates FORCE ROW LEVEL SECURITY;
-CREATE POLICY declaration_clearance_certificates_tenant_policy ON declaration_clearance_certificates
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'declaration_clearance_certificates' AND policyname = 'declaration_clearance_certificates_tenant_policy') THEN
+    CREATE POLICY declaration_clearance_certificates_tenant_policy ON declaration_clearance_certificates USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 
 -- Declaration lifecycle events publish on trade.declarations.v1 through the
 -- same transactional outbox as the ports.* topics.
 ALTER TABLE platform_outbox DROP CONSTRAINT platform_outbox_topic_check;
-ALTER TABLE platform_outbox
-    ADD CONSTRAINT platform_outbox_topic_check
-    CHECK (topic IN ('ports.booking.v1', 'ports.gate.v1', 'ports.queue.v1', 'trade.declarations.v1'));
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'platform_outbox_topic_check') THEN
+    ALTER TABLE platform_outbox ADD CONSTRAINT platform_outbox_topic_check CHECK (topic IN ('ports.booking.v1', 'ports.gate.v1', 'ports.queue.v1', 'trade.declarations.v1'));
+  END IF;
+END $$;

@@ -7,7 +7,7 @@
 -- drops. Envelope-level failures (bad signature, malformed artifact) are
 -- quarantined as envelope rejections without trusting the payload.
 
-CREATE TABLE passenger_manifests (
+CREATE TABLE IF NOT EXISTS passenger_manifests (
     manifest_id UUID PRIMARY KEY,           -- the envelope eventId
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     authority_kid TEXT NOT NULL CHECK (length(authority_kid) BETWEEN 2 AND 128),
@@ -27,10 +27,10 @@ CREATE TABLE passenger_manifests (
     received_at TIMESTAMPTZ NOT NULL,
     CHECK (records_total = records_accepted + records_rejected)
 );
-CREATE INDEX passenger_manifests_call_idx ON passenger_manifests (tenant_id, call_reference, received_at);
+CREATE INDEX IF NOT EXISTS passenger_manifests_call_idx ON passenger_manifests (tenant_id, call_reference, received_at);
 
 -- Accepted records, one row per manifest line.
-CREATE TABLE passenger_manifest_records (
+CREATE TABLE IF NOT EXISTS passenger_manifest_records (
     record_seq BIGSERIAL PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     manifest_id UUID NOT NULL REFERENCES passenger_manifests(manifest_id),
@@ -44,12 +44,12 @@ CREATE TABLE passenger_manifest_records (
     sex TEXT CHECK (sex IS NULL OR sex IN ('M', 'F', 'X')),
     UNIQUE (manifest_id, record_index)
 );
-CREATE INDEX passenger_manifest_records_document_idx ON passenger_manifest_records (tenant_id, document_number);
+CREATE INDEX IF NOT EXISTS passenger_manifest_records_document_idx ON passenger_manifest_records (tenant_id, document_number);
 
 -- The rejection queue: per-record rejections with reasons, plus envelope-
 -- level quarantine entries (record_index NULL, no trusted payload). Nothing
 -- is silently dropped — every unaccepted record is explained here.
-CREATE TABLE passenger_manifest_rejections (
+CREATE TABLE IF NOT EXISTS passenger_manifest_rejections (
     rejection_seq BIGSERIAL PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     manifest_id UUID REFERENCES passenger_manifests(manifest_id),
@@ -61,22 +61,31 @@ CREATE TABLE passenger_manifest_rejections (
     rejected_at TIMESTAMPTZ NOT NULL,
     CHECK (record_index IS NULL OR record_index >= 0)
 );
-CREATE INDEX passenger_manifest_rejections_manifest_idx ON passenger_manifest_rejections (manifest_id, record_index);
-CREATE INDEX passenger_manifest_rejections_envelope_idx ON passenger_manifest_rejections (envelope_event_id);
+CREATE INDEX IF NOT EXISTS passenger_manifest_rejections_manifest_idx ON passenger_manifest_rejections (manifest_id, record_index);
+CREATE INDEX IF NOT EXISTS passenger_manifest_rejections_envelope_idx ON passenger_manifest_rejections (envelope_event_id);
 
 -- Tenant isolation, matching migrations 0008/0009.
 ALTER TABLE passenger_manifests ENABLE ROW LEVEL SECURITY;
 ALTER TABLE passenger_manifests FORCE ROW LEVEL SECURITY;
-CREATE POLICY passenger_manifests_tenant_policy ON passenger_manifests
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'passenger_manifests' AND policyname = 'passenger_manifests_tenant_policy') THEN
+    CREATE POLICY passenger_manifests_tenant_policy ON passenger_manifests USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 ALTER TABLE passenger_manifest_records ENABLE ROW LEVEL SECURITY;
 ALTER TABLE passenger_manifest_records FORCE ROW LEVEL SECURITY;
-CREATE POLICY passenger_manifest_records_tenant_policy ON passenger_manifest_records
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'passenger_manifest_records' AND policyname = 'passenger_manifest_records_tenant_policy') THEN
+    CREATE POLICY passenger_manifest_records_tenant_policy ON passenger_manifest_records USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 ALTER TABLE passenger_manifest_rejections ENABLE ROW LEVEL SECURITY;
 ALTER TABLE passenger_manifest_rejections FORCE ROW LEVEL SECURITY;
-CREATE POLICY passenger_manifest_rejections_tenant_policy ON passenger_manifest_rejections
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'passenger_manifest_rejections' AND policyname = 'passenger_manifest_rejections_tenant_policy') THEN
+    CREATE POLICY passenger_manifest_rejections_tenant_policy ON passenger_manifest_rejections USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;

@@ -8,7 +8,7 @@
 -- Lifecycle events (registry.seafarer.v1) are JWS-signed into the shared
 -- platform_outbox in the same transaction as the mutation.
 
-CREATE TABLE registry_seafarers (
+CREATE TABLE IF NOT EXISTS registry_seafarers (
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     seafarer_id TEXT NOT NULL CHECK (length(seafarer_id) BETWEEN 1 AND 64),
     idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 256),
@@ -25,7 +25,7 @@ CREATE TABLE registry_seafarers (
     UNIQUE (idempotency_key)
 );
 
-CREATE TABLE registry_seafarer_certificates (
+CREATE TABLE IF NOT EXISTS registry_seafarer_certificates (
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     certificate_number TEXT NOT NULL CHECK (length(certificate_number) BETWEEN 4 AND 64),
     seafarer_id TEXT NOT NULL,
@@ -59,15 +59,15 @@ CREATE TABLE registry_seafarer_certificates (
     UNIQUE (idempotency_key),
     FOREIGN KEY (tenant_id, seafarer_id) REFERENCES registry_seafarers (tenant_id, seafarer_id)
 );
-CREATE INDEX registry_seafarer_certificates_holder_idx
+CREATE INDEX IF NOT EXISTS registry_seafarer_certificates_holder_idx
     ON registry_seafarer_certificates (tenant_id, seafarer_id);
 -- The expiry sweep scans ACTIVE certificates whose window has closed.
-CREATE INDEX registry_seafarer_certificates_expiry_idx
+CREATE INDEX IF NOT EXISTS registry_seafarer_certificates_expiry_idx
     ON registry_seafarer_certificates (tenant_id, expires_at) WHERE status = 'ACTIVE';
 
 -- Metered third-party verification usage. Each row is one verification
 -- call; the marketplace billing hook aggregates per (tenant, verifier).
-CREATE TABLE registry_certificate_verification_usage (
+CREATE TABLE IF NOT EXISTS registry_certificate_verification_usage (
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     usage_id TEXT NOT NULL CHECK (length(usage_id) BETWEEN 1 AND 64),
     certificate_number TEXT NOT NULL,
@@ -76,24 +76,33 @@ CREATE TABLE registry_certificate_verification_usage (
     outcome TEXT NOT NULL CHECK (outcome IN ('VALID', 'EXPIRED', 'SUSPENDED', 'REVOKED', 'NOT_FOUND')),
     PRIMARY KEY (tenant_id, usage_id)
 );
-CREATE INDEX registry_certificate_verification_usage_metering_idx
+CREATE INDEX IF NOT EXISTS registry_certificate_verification_usage_metering_idx
     ON registry_certificate_verification_usage (tenant_id, verifier_id, verified_at);
 
 -- Tenant isolation matching migration 0008.
 ALTER TABLE registry_seafarers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE registry_seafarers FORCE ROW LEVEL SECURITY;
-CREATE POLICY registry_seafarers_tenant_policy ON registry_seafarers
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'registry_seafarers' AND policyname = 'registry_seafarers_tenant_policy') THEN
+    CREATE POLICY registry_seafarers_tenant_policy ON registry_seafarers USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 
 ALTER TABLE registry_seafarer_certificates ENABLE ROW LEVEL SECURITY;
 ALTER TABLE registry_seafarer_certificates FORCE ROW LEVEL SECURITY;
-CREATE POLICY registry_seafarer_certificates_tenant_policy ON registry_seafarer_certificates
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'registry_seafarer_certificates' AND policyname = 'registry_seafarer_certificates_tenant_policy') THEN
+    CREATE POLICY registry_seafarer_certificates_tenant_policy ON registry_seafarer_certificates USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 
 ALTER TABLE registry_certificate_verification_usage ENABLE ROW LEVEL SECURITY;
 ALTER TABLE registry_certificate_verification_usage FORCE ROW LEVEL SECURITY;
-CREATE POLICY registry_certificate_verification_usage_tenant_policy ON registry_certificate_verification_usage
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'registry_certificate_verification_usage' AND policyname = 'registry_certificate_verification_usage_tenant_policy') THEN
+    CREATE POLICY registry_certificate_verification_usage_tenant_policy ON registry_certificate_verification_usage USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;

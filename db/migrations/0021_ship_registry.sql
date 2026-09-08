@@ -10,7 +10,7 @@
 -- platform_outbox in the same transaction as the mutation, matching the
 -- cruise/offshore emit pattern.
 
-CREATE TABLE registry_vessels (
+CREATE TABLE IF NOT EXISTS registry_vessels (
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     vessel_id TEXT NOT NULL CHECK (length(vessel_id) BETWEEN 1 AND 64),
     idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 256),
@@ -37,15 +37,15 @@ CREATE TABLE registry_vessels (
     -- application layer (internal/imonumber) before insert.
     CHECK (status <> 'CERTIFICATE_ISSUED' OR certificate_number IS NOT NULL)
 );
-CREATE UNIQUE INDEX registry_vessels_live_imo_idx
+CREATE UNIQUE INDEX IF NOT EXISTS registry_vessels_live_imo_idx
     ON registry_vessels (tenant_id, imo_number)
     WHERE status NOT IN ('DEREGISTERED');
-CREATE INDEX registry_vessels_status_idx ON registry_vessels (tenant_id, status);
+CREATE INDEX IF NOT EXISTS registry_vessels_status_idx ON registry_vessels (tenant_id, status);
 
 -- Append-only ownership history with a per-vessel SHA-256 hash chain: each
 -- entry commits to the previous entry's hash so silent rewriting or
 -- deletion of history rows breaks the chain and is detectable by audit.
-CREATE TABLE registry_vessel_ownership (
+CREATE TABLE IF NOT EXISTS registry_vessel_ownership (
     tenant_id TEXT NOT NULL REFERENCES platform_tenants(tenant_id),
     vessel_id TEXT NOT NULL,
     sequence_no INTEGER NOT NULL CHECK (sequence_no > 0),
@@ -64,12 +64,18 @@ CREATE TABLE registry_vessel_ownership (
 -- Tenant isolation matching migration 0008.
 ALTER TABLE registry_vessels ENABLE ROW LEVEL SECURITY;
 ALTER TABLE registry_vessels FORCE ROW LEVEL SECURITY;
-CREATE POLICY registry_vessels_tenant_policy ON registry_vessels
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'registry_vessels' AND policyname = 'registry_vessels_tenant_policy') THEN
+    CREATE POLICY registry_vessels_tenant_policy ON registry_vessels USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 
 ALTER TABLE registry_vessel_ownership ENABLE ROW LEVEL SECURITY;
 ALTER TABLE registry_vessel_ownership FORCE ROW LEVEL SECURITY;
-CREATE POLICY registry_vessel_ownership_tenant_policy ON registry_vessel_ownership
-    USING (tenant_id = current_setting('app.tenant_id', true))
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'registry_vessel_ownership' AND policyname = 'registry_vessel_ownership_tenant_policy') THEN
+    CREATE POLICY registry_vessel_ownership_tenant_policy ON registry_vessel_ownership USING (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;

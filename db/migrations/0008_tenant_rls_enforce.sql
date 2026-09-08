@@ -17,13 +17,29 @@ ALTER TABLE port_call_clearance_decisions ALTER COLUMN tenant_id SET NOT NULL;
 ALTER TABLE port_call_outbox ALTER COLUMN tenant_id SET NOT NULL;
 ALTER TABLE port_calls ENABLE ROW LEVEL SECURITY;
 ALTER TABLE port_calls FORCE ROW LEVEL SECURITY;
-CREATE POLICY port_calls_tenant_policy ON port_calls USING (tenant_id = current_setting('app.tenant_id', true)) WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'port_calls' AND policyname = 'port_calls_tenant_policy') THEN
+    CREATE POLICY port_calls_tenant_policy ON port_calls USING (tenant_id = current_setting('app.tenant_id', true)) WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 ALTER TABLE port_call_documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE port_call_documents FORCE ROW LEVEL SECURITY;
-CREATE POLICY port_call_documents_tenant_policy ON port_call_documents USING (tenant_id = current_setting('app.tenant_id', true)) WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'port_call_documents' AND policyname = 'port_call_documents_tenant_policy') THEN
+    CREATE POLICY port_call_documents_tenant_policy ON port_call_documents USING (tenant_id = current_setting('app.tenant_id', true)) WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 ALTER TABLE port_call_clearance_decisions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE port_call_clearance_decisions FORCE ROW LEVEL SECURITY;
-CREATE POLICY port_call_clearance_tenant_policy ON port_call_clearance_decisions USING (tenant_id = current_setting('app.tenant_id', true)) WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'port_call_clearance_decisions' AND policyname = 'port_call_clearance_tenant_policy') THEN
+    CREATE POLICY port_call_clearance_tenant_policy ON port_call_clearance_decisions USING (tenant_id = current_setting('app.tenant_id', true)) WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;
 ALTER TABLE port_call_outbox ENABLE ROW LEVEL SECURITY;
 ALTER TABLE port_call_outbox FORCE ROW LEVEL SECURITY;
-CREATE POLICY port_call_outbox_tenant_policy ON port_call_outbox USING (tenant_id = current_setting('app.tenant_id', true)) WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'port_call_outbox' AND policyname = 'port_call_outbox_tenant_policy') THEN
+    CREATE POLICY port_call_outbox_tenant_policy ON port_call_outbox USING (tenant_id = current_setting('app.tenant_id', true)) WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+  END IF;
+END $$;

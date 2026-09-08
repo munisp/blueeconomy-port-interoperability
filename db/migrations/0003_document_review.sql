@@ -6,17 +6,24 @@ ALTER TABLE port_call_documents
 
 ALTER TABLE port_call_documents
     DROP CONSTRAINT IF EXISTS port_call_documents_version_check;
-ALTER TABLE port_call_documents
-    ADD CONSTRAINT port_call_documents_version_check CHECK (version > 0);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'port_call_documents_version_check') THEN
+    ALTER TABLE port_call_documents ADD CONSTRAINT port_call_documents_version_check CHECK (version > 0);
+  END IF;
+END $$;
 
 ALTER TABLE port_call_documents
     DROP CONSTRAINT IF EXISTS port_call_documents_review_fields_check;
-ALTER TABLE port_call_documents
-    ADD CONSTRAINT port_call_documents_review_fields_check
-    CHECK ((status = 'DECLARED' AND reviewed_by IS NULL AND reviewed_at IS NULL) OR (status IN ('VERIFIED', 'REJECTED') AND reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL));
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'port_call_documents_review_fields_check') THEN
+    ALTER TABLE port_call_documents ADD CONSTRAINT port_call_documents_review_fields_check CHECK ((status = 'DECLARED' AND reviewed_by IS NULL AND reviewed_at IS NULL) OR (status IN ('VERIFIED', 'REJECTED') AND reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL));
+  END IF;
+END $$;
 
 ALTER TABLE port_call_outbox
     DROP CONSTRAINT IF EXISTS port_call_outbox_event_type_check;
-ALTER TABLE port_call_outbox
-    ADD CONSTRAINT port_call_outbox_event_type_check
-    CHECK (event_type IN ('port_call.created', 'port_call.status_changed', 'port_call.document_declared', 'port_call.document_reviewed', 'port_call.clearance_decided'));
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'port_call_outbox_event_type_check') THEN
+    ALTER TABLE port_call_outbox ADD CONSTRAINT port_call_outbox_event_type_check CHECK (event_type IN ('port_call.created', 'port_call.status_changed', 'port_call.document_declared', 'port_call.document_reviewed', 'port_call.clearance_decided'));
+  END IF;
+END $$;
