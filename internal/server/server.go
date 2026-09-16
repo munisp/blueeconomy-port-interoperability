@@ -25,6 +25,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/securechain"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tariff"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/waste"
 )
 
 // PushTokenStore is the push-token persistence seam consumed by the
@@ -55,6 +56,22 @@ type RegistryStore interface {
 	GetPermit(context.Context, string) (registry.CabotagePermit, error)
 	FlagViolation(context.Context, string, registry.Violation, registry.Principal) (registry.Violation, error)
 	ResolveViolation(context.Context, string, string, registry.Principal) (registry.Violation, error)
+	ApplyFisheriesPermit(context.Context, string, registry.ApplyFisheriesPermitRequest, registry.Principal) (registry.FisheriesPermit, error)
+	DecideFisheriesPermit(context.Context, string, string, bool, registry.Principal) (registry.FisheriesPermit, error)
+	TransitionFisheriesPermit(context.Context, string, string, registry.FisheriesPermitStatus, string, registry.Principal) (registry.FisheriesPermit, error)
+	GetFisheriesPermit(context.Context, string) (registry.FisheriesPermit, error)
+	FisheriesAuditTrail(context.Context, string) ([]registry.FisheriesAuditEntry, error)
+	VerifyFisheriesPermit(context.Context, string) (registry.FisheriesVerification, error)
+}
+
+// WasteStore is the MARPOL port reception facility waste-receipt
+// persistence seam consumed by the waste-receipt handlers.
+// *waste.Store satisfies this seam.
+type WasteStore interface {
+	Create(context.Context, string, waste.CreateRequest, waste.Principal) (waste.Receipt, error)
+	MarkDelivered(context.Context, string, string, waste.Principal) (waste.Receipt, error)
+	Verify(context.Context, string, string, waste.Principal) (waste.Receipt, error)
+	ListByPortCall(context.Context, string) ([]waste.Receipt, error)
 }
 
 // Config wires every security and integration dependency. New fails closed
@@ -83,6 +100,9 @@ type Config struct {
 	// cabotage store; mandatory — the /v1/registry surface fails closed
 	// without it. *registry.Store satisfies this seam.
 	Registry RegistryStore
+	// Waste is the Phase 19 MARPOL waste-receipt store; mandatory — the
+	// waste-receipt surface fails closed without it.
+	Waste WasteStore
 	// DeclarationScorer is the fail-closed risk-scoring boundary; declaration
 	// submission cannot proceed without it.
 	DeclarationScorer declarations.Scorer
@@ -121,6 +141,7 @@ type Server struct {
 	tariffs                   *tariff.Store
 	pushTokens                PushTokenStore
 	registry                  RegistryStore
+	waste                     WasteStore
 	declarationScorer         declarations.Scorer
 	declarationHighValueMinor int64
 	payments                  payments.Gateway
@@ -173,6 +194,7 @@ func New(config Config) (http.Handler, error) {
 		tariffs:                   config.Tariffs,
 		pushTokens:                config.PushTokens,
 		registry:                  config.Registry,
+		waste:                     config.Waste,
 		declarationScorer:         config.DeclarationScorer,
 		declarationHighValueMinor: config.DeclarationHighValueMinor,
 		payments:                  config.Payments,
@@ -235,6 +257,17 @@ func New(config Config) (http.Handler, error) {
 	api.HandleFunc("POST /v1/registry/cabotage-permits/", server.cabotagePermitOperation)
 	api.HandleFunc("POST /v1/registry/cabotage-violations", server.flagCabotageViolation)
 	api.HandleFunc("POST /v1/registry/cabotage-violations/", server.cabotageViolationOperation)
+	// Phase 19 fisheries licensing surface: permit applications,
+	// maker-checker decisions, suspension/revocation lifecycle, audit trail
+	// and minimal-disclosure public verification.
+	api.HandleFunc("POST /v1/registry/fisheries-permits", server.applyFisheriesPermit)
+	api.HandleFunc("GET /v1/registry/fisheries-permits/", server.fisheriesPermitRead)
+	api.HandleFunc("POST /v1/registry/fisheries-permits/", server.fisheriesPermitOperation)
+	// Phase 19 MARPOL port reception facility waste receipts, exposed on
+	// the port-call record.
+	api.HandleFunc("POST /v1/port-calls/{id}/waste-receipts", server.createWasteReceipt)
+	api.HandleFunc("GET /v1/port-calls/{id}/waste-receipts", server.listWasteReceipts)
+	api.HandleFunc("POST /v1/waste-receipts/", server.wasteReceiptOperation)
 	// Phase 16 PCS surface (GAP-PCS-AIS, GAP-BERTH-OPS,
 	// GAP-PORTCALL-LINKAGE): AIS status/positions, TOS berth occupancy and
 	// the AIS↔TOS↔NSW port-call linkage. Config-gated fail-closed.

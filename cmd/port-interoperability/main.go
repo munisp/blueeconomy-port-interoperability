@@ -37,6 +37,7 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tariff"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/telemetry"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
+	"github.com/munisp/blueeconomy-port-interoperability/internal/waste"
 )
 
 func main() {
@@ -227,7 +228,7 @@ func run() error {
 	// hold defaults on.
 	secureTokenMinutes, err := strconv.Atoi(defaultEnv("SECURE_CHAIN_TOKEN_TTL_MINUTES", "15"))
 	if err != nil || secureTokenMinutes < 1 {
-		return fmt.Errorf("SECURE_CHAIN_TOKEN_TTL_MINUTES must be a positive integer")
+		return errors.New("SECURE_CHAIN_TOKEN_TTL_MINUTES must be a positive integer")
 	}
 	velocityThreshold, err := strconv.Atoi(defaultEnv("SECURE_CHAIN_VELOCITY_THRESHOLD", "5"))
 	if err != nil {
@@ -275,6 +276,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("configure registry store: %w", err)
 	}
+	// Phase 19 MARPOL port reception facility waste receipts.
+	wasteStore, err := waste.NewStore(pool, envelopeSigner)
+	if err != nil {
+		return fmt.Errorf("configure waste-receipt store: %w", err)
+	}
 	// Phase 16 PCS integrations (GAP-PCS-AIS, GAP-BERTH-OPS,
 	// GAP-PORTCALL-LINKAGE). Each leg is env-gated: when AIS_FEED_URL /
 	// TOS_ENDPOINT are unset the leg is absent and the /v1/pcs surface
@@ -297,6 +303,7 @@ func run() error {
 		Tariffs:                   tariff.NewStore(pool, envelopeSigner),
 		PushTokens:                pushTokenStore,
 		Registry:                  registryStore,
+		Waste:                     wasteStore,
 		DeclarationScorer:         declarationScorer,
 		DeclarationHighValueMinor: highValueMinor,
 		Payments:                  paymentsGateway,
