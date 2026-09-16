@@ -203,9 +203,9 @@ func (store *Store) Close() { store.pool.Close() }
 func (store *Store) Pool() *pgxpool.Pool { return store.pool }
 
 const receiptColumns = `receipt_id, port_call_id, marpol_annex, waste_type, quantity, unit,
-	facility_reference, COALESCE(receipt_document_id, ''), COALESCE(receipt_document_uri, ''),
-	status, created_by, COALESCE(delivered_by, ''), COALESCE(verified_by, ''),
-	delivered_at, verified_at, created_at, updated_at, version`
+		facility_reference, COALESCE(receipt_document_id, ''), COALESCE(receipt_document_uri, ''),
+		status, created_by, COALESCE(delivered_by, ''), COALESCE(verified_by, ''),
+		delivered_at, verified_at, created_at, updated_at, version`
 
 func scanReceipt(row pgx.Row) (Receipt, error) {
 	var receipt Receipt
@@ -238,9 +238,9 @@ func (store *Store) emit(ctx context.Context, tx pgx.Tx, claims tenantctx.Claims
 		return fmt.Errorf("parse event id: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO platform_outbox (event_id, tenant_id, topic, event_type, idempotency_key, payload, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		eventID, claims.TenantID, events.TopicWasteReceipts, eventType, envelope.EventID, envelopeJSON, occurredAt); err != nil {
+			INSERT INTO platform_outbox (event_id, tenant_id, topic, event_type, idempotency_key, payload, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			eventID, claims.TenantID, events.TopicWasteReceipts, eventType, envelope.EventID, envelopeJSON, occurredAt); err != nil {
 		return fmt.Errorf("write %s outbox event: %w", eventType, err)
 	}
 	return nil
@@ -279,15 +279,15 @@ func (store *Store) Create(ctx context.Context, idempotencyKey string, request C
 		}
 		now := time.Now().UTC()
 		created, err := scanReceipt(tx.QueryRow(ctx, `
-			INSERT INTO portcall_waste_receipts
-				(tenant_id, receipt_id, idempotency_key, port_call_id, marpol_annex, waste_type, quantity, unit,
-				 facility_reference, receipt_document_id, receipt_document_uri, status, created_by, created_at, updated_at, version)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''), NULLIF($11, ''), 'DRAFT', $12, $13, $13, 1)
-			ON CONFLICT (idempotency_key) DO NOTHING
-			RETURNING `+receiptColumns,
-			claims.TenantID, request.ReceiptID, idempotencyKey, request.PortCallID, string(request.MarpolAnnex),
-			request.WasteType, request.Quantity, string(request.Unit), request.FacilityReference,
-			request.ReceiptDocumentID, request.ReceiptDocumentURI, principal.ID, now))
+				INSERT INTO portcall_waste_receipts
+					(tenant_id, receipt_id, idempotency_key, port_call_id, marpol_annex, waste_type, quantity, unit,
+					 facility_reference, receipt_document_id, receipt_document_uri, status, created_by, created_at, updated_at, version)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''), NULLIF($11, ''), 'DRAFT', $12, $13, $13, 1)
+				ON CONFLICT (idempotency_key) DO NOTHING
+				RETURNING `+receiptColumns,
+				claims.TenantID, request.ReceiptID, idempotencyKey, request.PortCallID, string(request.MarpolAnnex),
+				request.WasteType, request.Quantity, string(request.Unit), request.FacilityReference,
+				request.ReceiptDocumentID, request.ReceiptDocumentURI, principal.ID, now))
 		if errors.Is(err, pgx.ErrNoRows) {
 			existing, lookupErr := scanReceipt(tx.QueryRow(ctx,
 				`SELECT `+receiptColumns+` FROM portcall_waste_receipts WHERE idempotency_key = $1`, idempotencyKey))
@@ -347,16 +347,16 @@ func (store *Store) transition(ctx context.Context, idempotencyKey, receiptID st
 		var updated Receipt
 		if target == StatusDelivered {
 			updated, err = scanReceipt(tx.QueryRow(ctx, `
-				UPDATE portcall_waste_receipts
-				SET status = 'DELIVERED', delivered_by = $3, delivered_at = $4, updated_at = $4, version = version + 1
-				WHERE receipt_id = $1 AND version = $2
-				RETURNING `+receiptColumns, receiptID, current.Version, principal.ID, now))
+					UPDATE portcall_waste_receipts
+					SET status = 'DELIVERED', delivered_by = $3, delivered_at = $4, updated_at = $4, version = version + 1
+					WHERE receipt_id = $1 AND version = $2
+					RETURNING `+receiptColumns, receiptID, current.Version, principal.ID, now))
 		} else {
 			updated, err = scanReceipt(tx.QueryRow(ctx, `
-				UPDATE portcall_waste_receipts
-				SET status = 'VERIFIED', verified_by = $3, verified_at = $4, updated_at = $4, version = version + 1
-				WHERE receipt_id = $1 AND version = $2
-				RETURNING `+receiptColumns, receiptID, current.Version, principal.ID, now))
+					UPDATE portcall_waste_receipts
+					SET status = 'VERIFIED', verified_by = $3, verified_at = $4, updated_at = $4, version = version + 1
+					WHERE receipt_id = $1 AND version = $2
+					RETURNING `+receiptColumns, receiptID, current.Version, principal.ID, now))
 		}
 		if err != nil {
 			return fmt.Errorf("transition waste receipt: %w", err)
@@ -401,8 +401,8 @@ func (store *Store) ListByPortCall(ctx context.Context, portCallID string) ([]Re
 			return err
 		}
 		rows, err := tx.Query(ctx, `
-			SELECT `+receiptColumns+` FROM portcall_waste_receipts
-			WHERE port_call_id = $1 ORDER BY created_at, receipt_id`, portCallID)
+				SELECT `+receiptColumns+` FROM portcall_waste_receipts
+				WHERE port_call_id = $1 ORDER BY created_at, receipt_id`, portCallID)
 		if err != nil {
 			return fmt.Errorf("list waste receipts: %w", err)
 		}
