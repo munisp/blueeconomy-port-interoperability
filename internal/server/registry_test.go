@@ -80,6 +80,27 @@ func (fake fakeRegistry) FlagViolation(context.Context, string, registry.Violati
 func (fake fakeRegistry) ResolveViolation(context.Context, string, string, registry.Principal) (registry.Violation, error) {
 	return registry.Violation{Status: "RESOLVED"}, nil
 }
+func (fake fakeRegistry) ApplyFisheriesPermit(context.Context, string, registry.ApplyFisheriesPermitRequest, registry.Principal) (registry.FisheriesPermit, error) {
+	return registry.FisheriesPermit{Status: registry.FisheriesApplication}, fake.permitErr
+}
+func (fake fakeRegistry) DecideFisheriesPermit(context.Context, string, string, bool, registry.Principal) (registry.FisheriesPermit, error) {
+	return registry.FisheriesPermit{Status: registry.FisheriesGranted}, fake.decideErr
+}
+func (fake fakeRegistry) TransitionFisheriesPermit(context.Context, string, string, registry.FisheriesPermitStatus, string, registry.Principal) (registry.FisheriesPermit, error) {
+	return registry.FisheriesPermit{Status: registry.FisheriesSuspended}, fake.transitionEr
+}
+func (fake fakeRegistry) GetFisheriesPermit(context.Context, string) (registry.FisheriesPermit, error) {
+	return registry.FisheriesPermit{Status: registry.FisheriesGranted}, nil
+}
+func (fake fakeRegistry) FisheriesAuditTrail(context.Context, string) ([]registry.FisheriesAuditEntry, error) {
+	return []registry.FisheriesAuditEntry{{AuditID: 1, Action: "APPLIED"}}, nil
+}
+func (fake fakeRegistry) VerifyFisheriesPermit(_ context.Context, permitNumber string) (registry.FisheriesVerification, error) {
+	if fake.verifyErr != nil {
+		return registry.FisheriesVerification{}, fake.verifyErr
+	}
+	return registry.FisheriesVerification{PermitNumber: permitNumber, Valid: true}, nil
+}
 
 // registryTestHandler wires the shared test handler with the registry seam
 // overridden, matching the newWiredHandler pattern (unreachable pool; these
