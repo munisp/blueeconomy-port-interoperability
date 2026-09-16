@@ -362,6 +362,115 @@ func (server *Server) cabotageViolationOperation(response http.ResponseWriter, r
 	writeJSON(response, http.StatusOK, violation)
 }
 
+// applyFisheriesPermit handles POST /v1/registry/fisheries-permits: open a
+// fisheries permit application (vessel+owner linkage validated fail-closed).
+func (server *Server) applyFisheriesPermit(response http.ResponseWriter, request *http.Request) {
+	claims, ok := requireRole(response, request, RoleRegistryOfficer)
+	if !ok {
+		return
+	}
+	idempotencyKey, ok := idempotencyHeader(response, request)
+	if !ok {
+		return
+	}
+	var input registry.ApplyFisheriesPermitRequest
+	if !decodeJSON(response, request, &input) {
+		return
+	}
+	permit, err := server.registry.ApplyFisheriesPermit(request.Context(), idempotencyKey, input, registryPrincipal(claims))
+	if err != nil {
+		writeRegistryError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusCreated, permit)
+}
+
+// fisheriesPermitRead dispatches GET /v1/registry/fisheries-permits/... to
+// the permit read, the audit-trail read or the minimal-disclosure public
+// verification path (registry-verifier role).
+func (server *Server) fisheriesPermitRead(response http.ResponseWriter, request *http.Request) {
+	rest := strings.TrimPrefix(request.URL.Path, "/v1/registry/fisheries-permits/")
+	if rest == "verify" {
+		if _, ok := requireRole(response, request, RoleRegistryVerifier); !ok {
+			return
+		}
+		verification, err := server.registry.VerifyFisheriesPermit(request.Context(), request.URL.Query().Get("permitNumber"))
+		if err != nil {
+			writeRegistryError(response, err)
+			return
+		}
+		writeJSON(response, http.StatusOK, verification)
+		return
+	}
+	if _, ok := requireRole(response, request, RoleRegistryOfficer); !ok {
+		return
+	}
+	if strings.HasSuffix(rest, "/audit") {
+		trail, err := server.registry.FisheriesAuditTrail(request.Context(), strings.TrimSuffix(rest, "/audit"))
+		if err != nil {
+			writeRegistryError(response, err)
+			return
+		}
+		writeJSON(response, http.StatusOK, trail)
+		return
+	}
+	permit, err := server.registry.GetFisheriesPermit(request.Context(), rest)
+	if err != nil {
+		writeRegistryError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, permit)
+}
+
+// fisheriesPermitOperation dispatches POST /v1/registry/fisheries-permits/...
+// to the maker-checker grant/reject decision or the
+// suspension/reinstatement/revocation transition.
+func (server *Server) fisheriesPermitOperation(response http.ResponseWriter, request *http.Request) {
+	claims, ok := requireRole(response, request, RoleRegistryOfficer)
+	if !ok {
+		return
+	}
+	idempotencyKey, ok := idempotencyHeader(response, request)
+	if !ok {
+		return
+	}
+	rest := strings.TrimPrefix(request.URL.Path, "/v1/registry/fisheries-permits/")
+	if strings.HasSuffix(rest, "/decision") {
+		permitID := strings.TrimSuffix(rest, "/decision")
+		var input struct {
+			Grant bool `json:"grant"`
+		}
+		if !decodeJSON(response, request, &input) {
+			return
+		}
+		permit, err := server.registry.DecideFisheriesPermit(request.Context(), idempotencyKey, permitID, input.Grant, registryPrincipal(claims))
+		if err != nil {
+			writeRegistryError(response, err)
+			return
+		}
+		writeJSON(response, http.StatusOK, permit)
+		return
+	}
+	if strings.HasSuffix(rest, "/transitions") {
+		permitID := strings.TrimSuffix(rest, "/transitions")
+		var input struct {
+			Target registry.FisheriesPermitStatus `json:"target"`
+			Reason string                         `json:"reason"`
+		}
+		if !decodeJSON(response, request, &input) {
+			return
+		}
+		permit, err := server.registry.TransitionFisheriesPermit(request.Context(), idempotencyKey, permitID, input.Target, input.Reason, registryPrincipal(claims))
+		if err != nil {
+			writeRegistryError(response, err)
+			return
+		}
+		writeJSON(response, http.StatusOK, permit)
+		return
+	}
+	writeError(response, http.StatusNotFound, "unknown fisheries permit operation")
+}
+
 func writeRegistryError(response http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, registry.ErrNotFound):
