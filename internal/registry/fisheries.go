@@ -138,8 +138,8 @@ func validateFisheriesRequest(request ApplyFisheriesPermitRequest) error {
 }
 
 const fisheriesColumns = `permit_id, permit_number, permit_type, COALESCE(vessel_id, ''), owner_name,
-		COALESCE(site_reference, ''), valid_from, valid_to, status, applied_by, COALESCE(decided_by, ''),
-		created_at, updated_at, version`
+	COALESCE(site_reference, ''), valid_from, valid_to, status, applied_by, COALESCE(decided_by, ''),
+	created_at, updated_at, version`
 
 func scanFisheriesPermit(row pgx.Row) (FisheriesPermit, error) {
 	var permit FisheriesPermit
@@ -151,9 +151,9 @@ func scanFisheriesPermit(row pgx.Row) (FisheriesPermit, error) {
 
 func insertFisheriesAudit(ctx context.Context, tx pgx.Tx, tenantID, permitID, action, actor, detail string, occurredAt time.Time) error {
 	if _, err := tx.Exec(ctx, `
-			INSERT INTO registry_fisheries_permit_audit (tenant_id, permit_id, action, actor, detail, occurred_at)
-			VALUES ($1, $2, $3, $4, $5, $6)`,
-			tenantID, permitID, action, actor, detail, occurredAt); err != nil {
+		INSERT INTO registry_fisheries_permit_audit (tenant_id, permit_id, action, actor, detail, occurred_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		tenantID, permitID, action, actor, detail, occurredAt); err != nil {
 		return fmt.Errorf("append fisheries audit %s: %w", action, err)
 	}
 	return nil
@@ -193,15 +193,15 @@ func (store *Store) ApplyFisheriesPermit(ctx context.Context, idempotencyKey str
 		}
 		now := time.Now().UTC()
 		created, err := scanFisheriesPermit(tx.QueryRow(ctx, `
-				INSERT INTO registry_fisheries_permits
-					(tenant_id, permit_id, idempotency_key, permit_number, permit_type, vessel_id, owner_name,
-					 site_reference, valid_from, valid_to, status, applied_by, created_at, updated_at, version)
-				VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, NULLIF($8, ''), $9, $10, 'APPLICATION', $11, $12, $12, 1)
-				ON CONFLICT (idempotency_key) DO NOTHING
-				RETURNING `+fisheriesColumns,
-				claims.TenantID, request.PermitID, idempotencyKey, request.PermitNumber, string(request.PermitType),
-				request.VesselID, request.OwnerName, request.SiteReference, request.ValidFrom, request.ValidTo,
-				principal.ID, now))
+			INSERT INTO registry_fisheries_permits
+				(tenant_id, permit_id, idempotency_key, permit_number, permit_type, vessel_id, owner_name,
+				 site_reference, valid_from, valid_to, status, applied_by, created_at, updated_at, version)
+			VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, NULLIF($8, ''), $9, $10, 'APPLICATION', $11, $12, $12, 1)
+			ON CONFLICT (idempotency_key) DO NOTHING
+			RETURNING `+fisheriesColumns,
+			claims.TenantID, request.PermitID, idempotencyKey, request.PermitNumber, string(request.PermitType),
+			request.VesselID, request.OwnerName, request.SiteReference, request.ValidFrom, request.ValidTo,
+			principal.ID, now))
 		if errors.Is(err, pgx.ErrNoRows) {
 			existing, lookupErr := scanFisheriesPermit(tx.QueryRow(ctx,
 				`SELECT `+fisheriesColumns+` FROM registry_fisheries_permits WHERE idempotency_key = $1`, idempotencyKey))
@@ -264,10 +264,10 @@ func (store *Store) DecideFisheriesPermit(ctx context.Context, idempotencyKey, p
 			// Rejection is terminal; REJECTED sits outside the open-permit
 			// partial index so the vessel's open slot frees up.
 			rejected, err := scanFisheriesPermit(tx.QueryRow(ctx, `
-					UPDATE registry_fisheries_permits
-					SET status = 'REJECTED', decided_by = $3, updated_at = $4, version = version + 1
-					WHERE permit_id = $1 AND version = $2
-					RETURNING `+fisheriesColumns, permitID, current.Version, principal.ID, now))
+				UPDATE registry_fisheries_permits
+				SET status = 'REJECTED', decided_by = $3, updated_at = $4, version = version + 1
+				WHERE permit_id = $1 AND version = $2
+				RETURNING `+fisheriesColumns, permitID, current.Version, principal.ID, now))
 			if err != nil {
 				return fmt.Errorf("reject fisheries permit: %w", err)
 			}
@@ -286,10 +286,10 @@ func (store *Store) DecideFisheriesPermit(ctx context.Context, idempotencyKey, p
 			return nil
 		}
 		updated, err := scanFisheriesPermit(tx.QueryRow(ctx, `
-				UPDATE registry_fisheries_permits
-				SET status = 'GRANTED', decided_by = $3, updated_at = $4, version = version + 1
-				WHERE permit_id = $1 AND version = $2
-				RETURNING `+fisheriesColumns, permitID, current.Version, principal.ID, now))
+			UPDATE registry_fisheries_permits
+			SET status = 'GRANTED', decided_by = $3, updated_at = $4, version = version + 1
+			WHERE permit_id = $1 AND version = $2
+			RETURNING `+fisheriesColumns, permitID, current.Version, principal.ID, now))
 		if err != nil {
 			return fmt.Errorf("grant fisheries permit: %w", err)
 		}
@@ -347,10 +347,10 @@ func (store *Store) TransitionFisheriesPermit(ctx context.Context, idempotencyKe
 		}
 		now := time.Now().UTC()
 		updated, err := scanFisheriesPermit(tx.QueryRow(ctx, `
-				UPDATE registry_fisheries_permits
-				SET status = $3, updated_at = $4, version = version + 1
-				WHERE permit_id = $1 AND version = $2
-				RETURNING `+fisheriesColumns, permitID, current.Version, string(target), now))
+			UPDATE registry_fisheries_permits
+			SET status = $3, updated_at = $4, version = version + 1
+			WHERE permit_id = $1 AND version = $2
+			RETURNING `+fisheriesColumns, permitID, current.Version, string(target), now))
 		if err != nil {
 			return fmt.Errorf("transition fisheries permit: %w", err)
 		}
@@ -402,8 +402,8 @@ func (store *Store) FisheriesAuditTrail(ctx context.Context, permitID string) ([
 	var trail []FisheriesAuditEntry
 	err := tenantdb.WithTx(ctx, store.pool, func(tx pgx.Tx, _ tenantctx.Claims) error {
 		rows, err := tx.Query(ctx, `
-				SELECT audit_id, permit_id, action, actor, detail, occurred_at
-				FROM registry_fisheries_permit_audit WHERE permit_id = $1 ORDER BY audit_id`, permitID)
+			SELECT audit_id, permit_id, action, actor, detail, occurred_at
+			FROM registry_fisheries_permit_audit WHERE permit_id = $1 ORDER BY audit_id`, permitID)
 		if err != nil {
 			return fmt.Errorf("read fisheries audit trail: %w", err)
 		}
@@ -442,8 +442,8 @@ func (store *Store) VerifyFisheriesPermit(ctx context.Context, permitNumber stri
 			kind    FisheriesPermitType
 		)
 		err := tx.QueryRow(ctx, `
-				SELECT permit_type, status, valid_to FROM registry_fisheries_permits
-				WHERE permit_number = $1`, permitNumber).Scan(&kind, &status, &validTo)
+			SELECT permit_type, status, valid_to FROM registry_fisheries_permits
+			WHERE permit_number = $1`, permitNumber).Scan(&kind, &status, &validTo)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("%w: fisheries permit number %s", ErrNotFound, permitNumber)
 		}
