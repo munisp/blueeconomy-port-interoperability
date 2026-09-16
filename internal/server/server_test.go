@@ -139,6 +139,7 @@ func testConfig() Config {
 		Tariffs:           tariff.NewStore(nil, mustSigner()),
 		PushTokens:        fakePushTokens{},
 		Registry:          fakeRegistry{},
+		Waste:             fakeWasteStore{},
 		DeclarationScorer: fakeScorer{},
 		Payments:          fakePayments{},
 		Orchestrator:      fakeOrchestrator{},
