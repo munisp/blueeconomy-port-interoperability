@@ -45,6 +45,11 @@ const (
 	TopicRegistrySeafarer = "registry.seafarer.v1"
 	// TopicRegistryCabotage carries cabotage permit and violation events.
 	TopicRegistryCabotage = "registry.cabotage.v1"
+	// TopicRegistryFisheries carries fisheries permit lifecycle events.
+	TopicRegistryFisheries = "registry.fisheries.v1"
+	// TopicWasteReceipts carries MARPOL port reception facility waste
+	// delivery receipt lifecycle events.
+	TopicWasteReceipts = "ports.waste-receipts.v1"
 )
 
 // validTopic reports whether the topic is a platform v1 contract topic.
@@ -53,7 +58,7 @@ func validTopic(topic string) bool {
 	case TopicBooking, TopicGate, TopicQueue, TopicDeclarations,
 		TopicOffshore, TopicManifests, TopicCruise, TopicRevenueAssessments,
 		TopicSecureChain, TopicRegistryVessel, TopicRegistrySeafarer,
-		TopicRegistryCabotage:
+		TopicRegistryCabotage, TopicRegistryFisheries, TopicWasteReceipts:
 		return true
 	default:
 		return false
