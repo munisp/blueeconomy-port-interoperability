@@ -19,7 +19,6 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/payments"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/pcs"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
-	"github.com/munisp/blueeconomy-port-interoperability/internal/pushtokens"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/registry"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/securechain"
@@ -27,13 +26,6 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/waste"
 )
-
-// PushTokenStore is the push-token persistence seam consumed by the
-// /v1/push-tokens handlers.
-type PushTokenStore interface {
-	Register(context.Context, pushtokens.RegisterRequest) (pushtokens.Token, error)
-	Revoke(context.Context, string) (pushtokens.Token, error)
-}
 
 // RegistryStore is the Phase 12 ship-registry / seafarer-certification /
 // cabotage persistence seam consumed by the /v1/registry handlers.
@@ -91,11 +83,6 @@ type Config struct {
 	Cruise    *cruise.Store
 	Manifests *manifests.Store
 	Tariffs   *tariff.Store
-	// PushTokens is the mobile push-notification device-token store;
-	// mandatory — the /v1/push-tokens surface fails closed without it.
-	// *pushtokens.Store satisfies this seam; the interface keeps the
-	// handler testable without a database.
-	PushTokens PushTokenStore
 	// Registry is the Phase 12 ship-registry / seafarer-certification /
 	// cabotage store; mandatory — the /v1/registry surface fails closed
 	// without it. *registry.Store satisfies this seam.
@@ -139,7 +126,6 @@ type Server struct {
 	cruise                    *cruise.Store
 	manifests                 *manifests.Store
 	tariffs                   *tariff.Store
-	pushTokens                PushTokenStore
 	registry                  RegistryStore
 	waste                     WasteStore
 	declarationScorer         declarations.Scorer
@@ -160,9 +146,6 @@ func New(config Config) (http.Handler, error) {
 	}
 	if config.Offshore == nil || config.Cruise == nil || config.Manifests == nil || config.Tariffs == nil {
 		return nil, errors.New("server requires offshore, cruise, manifest and tariff stores")
-	}
-	if config.PushTokens == nil {
-		return nil, errors.New("server requires a push-token store")
 	}
 	if config.Registry == nil {
 		return nil, errors.New("server requires a registry store")
@@ -192,7 +175,6 @@ func New(config Config) (http.Handler, error) {
 		cruise:                    config.Cruise,
 		manifests:                 config.Manifests,
 		tariffs:                   config.Tariffs,
-		pushTokens:                config.PushTokens,
 		registry:                  config.Registry,
 		waste:                     config.Waste,
 		declarationScorer:         config.DeclarationScorer,
@@ -240,8 +222,6 @@ func New(config Config) (http.Handler, error) {
 	api.HandleFunc("POST /v1/cruise-calls", server.createCruiseCall)
 	api.HandleFunc("GET /v1/cruise-calls/", server.cruiseCallRead)
 	api.HandleFunc("POST /v1/cruise-calls/", server.cruiseCallOperation)
-	api.HandleFunc("POST /v1/push-tokens", server.registerPushToken)
-	api.HandleFunc("POST /v1/push-tokens/revoke", server.revokePushToken)
 	// Phase 12 ministry-coverage surface: ship registry, seafarer
 	// certification and cabotage enforcement.
 	api.HandleFunc("POST /v1/registry/vessels", server.registerVessel)

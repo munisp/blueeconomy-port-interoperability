@@ -336,6 +336,5 @@ const (
 	EventRiskAssessed       = "trade.declaration.risk-assessed.v1"
 	EventScoringUnavailable = "trade.declaration.scoring-unavailable.v1"
 	EventCleared            = "trade.declaration.cleared.v1"
-	EventRejected           = "trade.declaration.rejected.v1"
 	EventAmended            = "trade.declaration.amended.v1"
 )

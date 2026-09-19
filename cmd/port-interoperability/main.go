@@ -29,7 +29,6 @@ import (
 	"github.com/munisp/blueeconomy-port-interoperability/internal/pcs/linkage"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/pcs/tos"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/portcall"
-	"github.com/munisp/blueeconomy-port-interoperability/internal/pushtokens"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/queue"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/registry"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/securechain"
@@ -266,10 +265,6 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("configure manifest store: %w", err)
 	}
-	pushTokenStore, err := pushtokens.NewStore(pool)
-	if err != nil {
-		return fmt.Errorf("configure push-token store: %w", err)
-	}
 	// Phase 12 ministry-coverage surface: ship registry, seafarer
 	// certification and cabotage enforcement.
 	registryStore, err := registry.NewStore(pool, envelopeSigner)
@@ -301,7 +296,6 @@ func run() error {
 		Cruise:                    cruise.NewStore(pool, envelopeSigner),
 		Manifests:                 manifestStore,
 		Tariffs:                   tariff.NewStore(pool, envelopeSigner),
-		PushTokens:                pushTokenStore,
 		Registry:                  registryStore,
 		Waste:                     wasteStore,
 		DeclarationScorer:         declarationScorer,
@@ -337,6 +331,14 @@ func run() error {
 		defer cancel()
 		_ = httpServer.Shutdown(shutdownContext)
 	}()
+	log.Printf("port-interoperability published topics: %s", strings.Join([]string{
+		events.TopicBooking, events.TopicGate, events.TopicQueue,
+		events.TopicDeclarations, events.TopicOffshore, events.TopicManifests,
+		events.TopicCruise, events.TopicRevenueAssessments, events.TopicSecureChain,
+		events.TopicRegistryVessel, events.TopicRegistrySeafarer,
+		events.TopicRegistryCabotage, events.TopicRegistryFisheries,
+		events.TopicWasteReceipts,
+	}, ", "))
 	log.Printf("port-interoperability listening on :%s", port)
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve: %w", err)
