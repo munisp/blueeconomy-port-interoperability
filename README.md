@@ -148,17 +148,10 @@ eCallUp 2.0 truck call-up queue (new):
   the same transactional `platform_outbox` (classification `INTERNAL`,
   provenance principal + JWS provenance signature).
 
-Mobile push tokens (migration 0020):
-
-- `POST /v1/push-tokens` registers or refreshes the caller's device push
-  token (`{deviceId, token, platform}`; platform `android|ios|web`), scoped
-  by (tenant, verified user subject, device) — the user id is always the
-  verified gateway subject, never the request body. A provider token moving
-  between devices/users revokes the previous ACTIVE holder atomically.
-- `POST /v1/push-tokens/revoke` marks the caller's device registration
-  REVOKED (logout / token rollover); unknown or already-revoked devices
-  fail closed with 404. No maker-checker (self-service device plumbing) and
-  no platform event surface. Contract: `openapi.yaml`.
+Mobile push tokens: the REST surface (`/v1/push-tokens`) was removed in
+Phase 20 — it duplicated the singlewindow `pushTokens` tRPC router, which is
+the path the Flutter app actually calls, and had zero callers. Migration
+0020 is retained for audit history; the table is no longer written.
 
 Nigeria Customs cross-validation (new, migration 0011):
 
