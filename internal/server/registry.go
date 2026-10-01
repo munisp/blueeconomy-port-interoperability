@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/munisp/blueeconomy-port-interoperability/internal/imonumber"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/registry"
 	"github.com/munisp/blueeconomy-port-interoperability/internal/tenantctx"
 )
@@ -57,6 +58,27 @@ func (server *Server) registryVesselRead(response http.ResponseWriter, request *
 		return
 	}
 	vessel, err := server.registry.Get(request.Context(), rest)
+	if err != nil {
+		writeRegistryError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, vessel)
+}
+
+// registryVesselByIMO handles GET /v1/registry/vessels/by-imo/{imo}: the
+// exact-IMO lookup for mobile clients. The IMO check digit is validated
+// fail-closed and an unknown IMO answers 404 — never a fuzzy or prefix
+// match.
+func (server *Server) registryVesselByIMO(response http.ResponseWriter, request *http.Request) {
+	if _, ok := requireRole(response, request, RoleRegistryOfficer); !ok {
+		return
+	}
+	imo := request.PathValue("imo")
+	if !imonumber.Valid(imo) {
+		writeError(response, http.StatusBadRequest, "imo must be a seven-digit IMO number with a valid check digit")
+		return
+	}
+	vessel, err := server.registry.GetByIMO(request.Context(), imo)
 	if err != nil {
 		writeRegistryError(response, err)
 		return

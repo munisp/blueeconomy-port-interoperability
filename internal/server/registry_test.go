@@ -38,6 +38,12 @@ func (fake fakeRegistry) Get(_ context.Context, vesselID string) (registry.Vesse
 	}
 	return registry.Vessel{VesselID: vesselID, Status: registry.VesselApplication}, nil
 }
+func (fake fakeRegistry) GetByIMO(_ context.Context, imoNumber string) (registry.Vessel, error) {
+	if fake.registerErr != nil {
+		return registry.Vessel{}, fake.registerErr
+	}
+	return registry.Vessel{VesselID: "vessel-by-imo", IMONumber: imoNumber, Status: registry.VesselApplication}, nil
+}
 func (fake fakeRegistry) List(context.Context, registry.VesselStatus, int) ([]registry.Vessel, error) {
 	return []registry.Vessel{}, nil
 }
@@ -164,6 +170,38 @@ func TestRegistryErrorMapping(t *testing.T) {
 	recorder = httptest.NewRecorder()
 	conflictHandler.ServeHTTP(recorder, authedRequest(t, http.MethodPost, "/v1/registry/vessels/vessel-1/transitions", `{"target":"REGISTRATION"}`, RoleRegistryOfficer))
 	require.Equal(t, http.StatusConflict, recorder.Code)
+}
+
+func TestVesselByIMORequiresRole(t *testing.T) {
+	handler := registryTestHandler(t, fakeRegistry{})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, authedRequest(t, http.MethodGet, "/v1/registry/vessels/by-imo/9074729", "", RoleTrader))
+	require.Equal(t, http.StatusForbidden, recorder.Code)
+}
+
+func TestVesselByIMOHappyPath(t *testing.T) {
+	handler := registryTestHandler(t, fakeRegistry{})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, authedRequest(t, http.MethodGet, "/v1/registry/vessels/by-imo/9074729", "", RoleRegistryOfficer))
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	var vessel registry.Vessel
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &vessel))
+	require.Equal(t, "9074729", vessel.IMONumber)
+}
+
+func TestVesselByIMORejectsBadCheckDigit(t *testing.T) {
+	handler := registryTestHandler(t, fakeRegistry{})
+	recorder := httptest.NewRecorder()
+	// 9074728: the weighted mod-10 check digit of 907472 recomputes to 9.
+	handler.ServeHTTP(recorder, authedRequest(t, http.MethodGet, "/v1/registry/vessels/by-imo/9074728", "", RoleRegistryOfficer))
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+}
+
+func TestVesselByIMONotFoundMaps404(t *testing.T) {
+	handler := registryTestHandler(t, fakeRegistry{registerErr: registry.ErrNotFound})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, authedRequest(t, http.MethodGet, "/v1/registry/vessels/by-imo/9074729", "", RoleRegistryOfficer))
+	require.Equal(t, http.StatusNotFound, recorder.Code)
 }
 
 func TestVerifyCertificateRequiresVerifierRole(t *testing.T) {

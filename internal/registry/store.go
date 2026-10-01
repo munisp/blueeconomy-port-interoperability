@@ -167,7 +167,7 @@ func appendOwnership(ctx context.Context, tx pgx.Tx, vessel Vessel, ownerName, o
 		INSERT INTO registry_vessel_ownership
 			(tenant_id, vessel_id, sequence_no, owner_name, owner_country, effective_from, recorded_by, recorded_at, previous_hash, entry_hash)
 		VALUES (current_setting('app.tenant_id', true), $1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		entry.VesselID, entry.SequenceNo, ownerName, ownerCountry, entry.EffectiveFrom, recordedBy, entry.RecordedAt, previousHash, entry.EntryHash); err != nil {
+		entry.VesselID, entry.SequenceNo, ownerName, ownerCountry, effectiveFrom, recordedBy, entry.RecordedAt, previousHash, entry.EntryHash); err != nil {
 		return OwnershipEntry{}, fmt.Errorf("append ownership entry: %w", err)
 	}
 	return entry, nil
@@ -247,6 +247,26 @@ func (store *Store) Get(ctx context.Context, vesselID string) (Vessel, error) {
 		}
 		if err != nil {
 			return fmt.Errorf("read vessel: %w", err)
+		}
+		vessel = found
+		return nil
+	})
+	return vessel, err
+}
+
+// GetByIMO returns the single vessel registered under an exact,
+// check-digit-valid IMO number. It never fuzzy-matches: an unknown IMO is
+// ErrNotFound so the handler answers 404.
+func (store *Store) GetByIMO(ctx context.Context, imoNumber string) (Vessel, error) {
+	var vessel Vessel
+	err := tenantdb.WithTx(ctx, store.pool, func(tx pgx.Tx, _ tenantctx.Claims) error {
+		found, err := scanVessel(tx.QueryRow(ctx,
+			`SELECT `+vesselColumns+` FROM registry_vessels WHERE imo_number = $1`, imoNumber))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: IMO %s", ErrNotFound, imoNumber)
+		}
+		if err != nil {
+			return fmt.Errorf("read vessel by IMO: %w", err)
 		}
 		vessel = found
 		return nil
