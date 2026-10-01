@@ -34,6 +34,7 @@ import (
 type RegistryStore interface {
 	Register(context.Context, string, registry.RegisterVesselRequest, registry.Principal) (registry.Vessel, error)
 	Get(context.Context, string) (registry.Vessel, error)
+	GetByIMO(context.Context, string) (registry.Vessel, error)
 	List(context.Context, registry.VesselStatus, int) ([]registry.Vessel, error)
 	OwnershipHistory(context.Context, string) ([]registry.OwnershipEntry, error)
 	Transition(context.Context, string, string, registry.VesselStatus, string, registry.Principal) (registry.Vessel, error)
@@ -226,6 +227,7 @@ func New(config Config) (http.Handler, error) {
 	// certification and cabotage enforcement.
 	api.HandleFunc("POST /v1/registry/vessels", server.registerVessel)
 	api.HandleFunc("GET /v1/registry/vessels", server.listVessels)
+	api.HandleFunc("GET /v1/registry/vessels/by-imo/{imo}", server.registryVesselByIMO)
 	api.HandleFunc("GET /v1/registry/vessels/", server.registryVesselRead)
 	api.HandleFunc("POST /v1/registry/vessels/", server.registryVesselOperation)
 	api.HandleFunc("POST /v1/registry/seafarers", server.registerSeafarer)
